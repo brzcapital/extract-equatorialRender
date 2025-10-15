@@ -2,9 +2,13 @@
   "name": "extract-equatorial",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=18.x"
+  },
   "dependencies": {
-    "express": "4.19.2",
-    "pdf-parse": "1.1.1"
+    "express": "^4.19.2",
+    "pdf-parse": "^1.1.1",
+    "node-fetch": "^3.3.2"
   },
   "scripts": {
     "start": "node index.mjs"
