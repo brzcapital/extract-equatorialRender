@@ -2,15 +2,18 @@
   "name": "extract-equatorial",
   "version": "1.0.0",
   "type": "module",
-  "engines": {
-    "node": ">=18.x"
+  "description": "Servidor Express para extração estruturada de faturas Equatorial",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
   },
   "dependencies": {
     "express": "^4.19.2",
+    "cors": "^2.8.5",
     "pdf-parse": "^1.1.1",
     "node-fetch": "^3.3.2"
   },
-  "scripts": {
-    "start": "node index.mjs"
+  "engines": {
+    "node": "22.x"
   }
 }
