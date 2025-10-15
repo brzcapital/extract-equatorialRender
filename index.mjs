@@ -1,207 +1,214 @@
-// ======== DEPENDÊNCIAS PRINCIPAIS ========
+// ===============================
+// 🔹 Importações básicas
+// ===============================
 import express from "express";
+import cors from "cors";
 import fetch from "node-fetch";
+import pdfParse from "pdf-parse";
 
-// Importação segura do pdf-parse (evita bug no Render)
-import pkg from "pdf-parse/lib/pdf-parse.js";
-const pdfParse = pkg.default || pkg;
-
-// ======== CONFIGURAÇÃO DO SERVIDOR ========
+// ===============================
+// 🔹 Inicialização do servidor
+// ===============================
 const app = express();
-app.use(express.json());
+app.use(cors());
+app.use(express.json({ limit: "25mb" }));
 
-const PORT = process.env.PORT || 3000;
-
-// ======== ENDPOINT PRINCIPAL ========
-// Recebe uma URL de PDF e retorna o texto da 1ª página
-app.post("/extract", async (req, res) => {
-  try {
-    const { pdf_url } = req.body;
-
-    if (!pdf_url) {
-      return res.status(400).json({ error: "Missing parameter: pdf_url" });
-    }
-
-    console.log(`🔹 Baixando PDF de: ${pdf_url}`);
-
-    // Faz o download do PDF
-    const response = await fetch(pdf_url);
-    if (!response.ok) {
-      return res.status(400).json({ error: `Erro ao baixar PDF: ${response.statusText}` });
-    }
-
-    const pdfBuffer = await response.arrayBuffer();
-
-    // Extrai texto do PDF
-    const data = await pdfParse(Buffer.from(pdfBuffer));
-
-    // Extrai apenas a primeira página
-    const primeiraPagina = data.text.split(/\f/)[0]; // \f = quebra de página
-
-    console.log("✅ Extração concluída com sucesso.");
-
-    // Retorna texto limpo da primeira página
-    return res.json({
-      status: "ok",
-      pdf_url,
-      primeira_pagina_texto: primeiraPagina.trim().slice(0, 15000) // limite de segurança
-    });
-  } catch (error) {
-    console.error("❌ Erro ao processar PDF:", error);
-    return res.status(500).json({ error: error.message });
-  }
-});
-
-// ======== ENDPOINT DE TESTE ========
-app.get("/", (req, res) => {
-  res.send("✅ Servidor ativo! Use POST /extract com { pdf_url }");
-});
-
-// ===================== EXTRACT ESTRUTURADO (1ª página) =====================
-// Funções auxiliares e regras determinísticas (mesmas bases do que combinamos)
-const toISO = (s) => {
+// ===============================
+// 🔹 Funções auxiliares
+// ===============================
+function toISO(s) {
   const m = s?.match?.(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
   if (!m) return null;
-  const [ , dd, mm, yyyy ] = m;
+  const [_, dd, mm, yyyy] = m;
   return `${yyyy}-${mm}-${dd}`;
-};
-const toNum = (s) => {
-  if (s == null) return null;
-  const t = String(s).replace(/\./g, "").replace(",", ".").replace(/[^\d\.\-]/g, "");
-  const n = Number(t);
-  return Number.isFinite(n) ? n : null;
-};
-const onlyDigits = (s) => (s ? (s.match(/\d+/g)||[]).join("") : null);
+}
 
-const findSection = (text, titleRegex, nextHeaderRegex) => {
+function toNum(s) {
+  if (!s) return null;
+  const n = Number(
+    s.replace(/\./g, "").replace(",", ".").replace(/[^\d\.\-]/g, "")
+  );
+  return Number.isFinite(n) ? n : null;
+}
+
+function onlyDigits(s) {
+  return s ? (s.match(/\d+/g) || []).join("") : null;
+}
+
+function findSection(text, titleRegex, nextRegex) {
   const start = text.search(titleRegex);
   if (start === -1) return null;
-  const next = nextHeaderRegex ? text.slice(start+1).search(nextHeaderRegex) : -1;
-  return next === -1 ? text.slice(start) : text.slice(start, start+1+next);
-};
+  const slice = text.slice(start);
+  const next = nextRegex ? slice.search(nextRegex) : -1;
+  return next === -1 ? slice : slice.slice(0, next);
+}
 
-const getProximaLeitura = (text) => {
-  const sec = findSection(text, /DATA\s+DAS\s+LEITURAS|LEITURAS/i, /CONSUMO|INFORMA|FATURA|^$/im);
-  if (!sec) return null;
-  const ds = [...sec.matchAll(/(\d{2}\/\d{2}\/\d{4})/g)].map(m => m[1]);
-  return ds[2] ? toISO(ds[2]) : null; // 3ª data = Próxima
-};
-const getApresentacao = (text) => {
-  const tail = text.split(/\r?\n/).slice(-25).join("\n");
-  const m = tail.match(/Apresenta(ç|c)ão(?:\s+da\s+Fatura)?[^\d]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
-  return m ? toISO(m[2]) : null;
-};
-const getMedia = (text) => {
-  const sec = findSection(text, /CONSUMO\s*KWh/i, /INJE(Ç|C)ÃO|INFORMA|^$/im);
-  const lm = sec?.match(/M(É|E)DIA[^\d]*([\d\.\,]+)/i);
-  return lm ? toNum(lm[2]) : null;
-};
-const getCicloGeracao = (text) => {
-  const m = text.match(/INFORMA(Ç|C)ÕES\s+DO\s+SCEE:\s*GERA(Ç|C)ÃO\s+DO\s+CICLO\s*\(([^)]+)\)/i);
-  return m ? m[3].trim() : null;
-};
-const getUcGeradoraEProducaoEExcedente = (text) => {
-  const sec = findSection(text, /INFORMA(Ç|C)ÕES\s+DO\s+SCEE/i, /INJE(Ç|C)ÃO|^$/im);
-  if (!sec) return { uc: null, prod: null, exc: null };
-  const uc = onlyDigits((sec.match(/\bUC[^\d]*(\d{6,})/)||[])[1]) ||
-             onlyDigits((sec.match(/(\d{8,12})[^\d]*:/)||[])[1]);
-  const prod = toNum((sec.match(/:\s*([\d\.\,]+)\s*kWh/i)||[])[1]);
-  // EXCEDENTE logo após a UC (quando existe explícito)
-  const mexc = sec.match(/\bEXCEDENTE[^\d]+([\d\.\,]+)/i);
-  const exc = mexc ? toNum(mexc[1]) : null;
-  return { uc, prod, exc };
-};
-const getInfoCliente = (text) => {
-  const sec = findSection(text, /INFORMA(Ç|C)ÕES\s+PARA\s+O\s+CLIENTE/i, /INJE(Ç|C)ÃO|^$/im);
-  return sec?.replace(/.*INFORMA(Ç|C)ÕES\s+PARA\s+O\s+CLIENTE[^\n]*\n/i, "").trim() || null;
-};
-const getInjecoes = (text) => {
-  const sec = findSection(text, /INJE(Ç|C)ÃO\s+SCEE/i, /INFORMA|CONSUMO|^$/im);
-  if (!sec) return [];
-  const lines = sec.split(/\r?\n/).filter(l => /\d{5,}/.test(l));
-  const items = [];
-  for (const l of lines) {
-    const uc = onlyDigits((l.match(/(\d{5,15})/)||[])[1]);
-    const nums = (l.match(/[\d\.\,]+/g)||[]).map(toNum).filter(v => v!=null);
-    if (!uc || nums.length < 2) continue;
-    const quant = nums.find(n => n > 2) ?? null;
-    const units = nums.filter(n => n > 0 && n <= 2);
-    const [pun, tus] = units.slice(-2);
-    items.push({
-      uc, quant_kwh: quant,
-      preco_unit_com_tributos: pun, tarifa_unitaria: tus
-    });
-  }
-  return items;
-};
+// ===============================
+// 🔹 Rota principal de teste
+// ===============================
+app.get("/", (req, res) => {
+  res.send("✅ Servidor ativo! Use POST /extract-structured com { pdf_url }");
+});
 
+// ===============================
+// 🔹 Rota principal de extração
+// ===============================
 app.post("/extract-structured", async (req, res) => {
   try {
     const { pdf_url } = req.body;
-    if (!pdf_url) return res.status(400).json({ error: "Missing pdf_url" });
+    if (!pdf_url) {
+      return res.status(400).json({ error: "Faltando parâmetro: pdf_url" });
+    }
 
-    const r = await fetch(pdf_url);
-    if (!r.ok) return res.status(400).json({ error: `Erro ao baixar PDF: ${r.statusText}` });
-    const buf = Buffer.from(await r.arrayBuffer());
-    const data = await pdfParse(buf);
-    const text = (data.text || "").split(/\f/)[0];
+    // 1️⃣ Baixar PDF
+    const response = await fetch(pdf_url);
+    if (!response.ok) {
+      return res.status(400).json({ error: "Erro ao baixar PDF" });
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
 
-    // Coletas determinísticas
-    const prox = getProximaLeitura(text);
-    const apr = getApresentacao(text);
-    const med = getMedia(text);
-    const ciclo = getCicloGeracao(text);
-    const info = getInfoCliente(text);
-    const { uc, prod, exc } = getUcGeradoraEProducaoEExcedente(text);
-    const inj = getInjecoes(text);
+    // 2️⃣ Ler conteúdo textual
+    const data = await pdfParse(buffer);
+    const text = (data.text || "").replace(/\r/g, "");
 
-    // Monta JSON com TODOS os campos esperados (null se não achar)
-    const result = {
-      unidade_consumidora: null,
-      total_a_pagar: null,
-      data_vencimento: null,
-      data_leitura_anterior: null,
-      data_leitura_atual: null,
-      data_proxima_leitura: prox,
-      data_emissao: null,
-      apresentacao: apr,
-      mes_ano_referencia: null,
-      leitura_anterior: null,
-      leitura_atual: null,
-      beneficio_tarifario_bruto: null,
-      beneficio_tarifario_liquido: null, // negocio: sempre negativo — aplique no Bubble se preferir
-      icms: null,
-      pis_pasep: null,
-      cofins: null,
-      fatura_debito_automatico: null, // yes/no se quiser implementar
-      credito_recebido: null,
-      saldo_kwh: null,
-      excedente_recebido: exc,
-      ciclo_geracao: ciclo,
-      informacoes_para_o_cliente: info,
-      uc_geradora: uc,
-      uc_geradora_producao: prod,
+    // 3️⃣ Extrações principais
+    const datas = text.match(
+      /(\d{2}\/\d{2}\/\d{4}).*(\d{2}\/\d{2}\/\d{4}).*(\d{2}\/\d{2}\/\d{4})/s
+    );
+    const data_proxima_leitura = datas ? toISO(datas[3]) : null;
+
+    const apresentacaoMatch = text.match(
+      /Apresenta(ç|c)ão[^\d]*(\d{2}\/\d{2}\/\d{4})/i
+    );
+    const apresentacao = apresentacaoMatch ? toISO(apresentacaoMatch[2]) : null;
+
+    const cicloMatch = text.match(/GERA(Ç|C)ÃO\s+DO\s+CICLO\s*\(([^)]+)\)/i);
+    const ciclo_geracao = cicloMatch ? cicloMatch[2].trim() : null;
+
+    const infoSec = findSection(
+      text,
+      /INFORMA(Ç|C)ÕES\s+PARA\s+O\s+CLIENTE/i,
+      /INJE(Ç|C)ÃO|^$/im
+    );
+    const informacoes_para_o_cliente = infoSec
+      ? infoSec
+          .replace(
+            /.*INFORMA(Ç|C)ÕES\s+PARA\s+O\s+CLIENTE[^\n]*\n/i,
+            ""
+          )
+          .trim()
+      : null;
+
+    const ucBlock = findSection(
+      text,
+      /INFORMA(Ç|C)ÕES\s+DO\s+SCEE/i,
+      /INJE(Ç|C)ÃO|^$/im
+    );
+    const uc_geradora = onlyDigits(
+      (ucBlock?.match(/\bUC[^\d]*(\d{6,})/) || [])[1]
+    );
+    const uc_geradora_producao = toNum(
+      (ucBlock?.match(/:\s*([\d\.\,]+)\s*kWh/i) || [])[1]
+    );
+    const excedente_recebido = toNum(
+      (ucBlock?.match(/EXCEDENTE[^\d]+([\d\.\,]+)/i) || [])[1]
+    );
+
+    // Média e outros campos derivados
+    const mediaMatch = text.match(/M[ÉE]DIA[^\d]+([\d\.\,]+)/i);
+    const media = toNum(mediaMatch?.[1]);
+
+    // 4️⃣ Retorno padronizado
+    const resultado = {
+      unidade_consumidora: onlyDigits(
+        (text.match(/UNIDADE\s+CONSUMIDORA[^\d]*(\d{5,})/i) || [])[1]
+      ),
+      total_a_pagar: toNum(
+        (text.match(/TOTAL\s+A\s+PAGAR[^\d]+([\d\.\,]+)/i) || [])[1]
+      ),
+      data_vencimento: toISO(
+        (text.match(/VENCIMENTO[^\d]*(\d{2}\/\d{2}\/\d{4})/i) || [])[1]
+      ),
+      data_leitura_anterior: toISO(
+        (text.match(/LEITURA\s+ANTERIOR[^\d]*(\d{2}\/\d{2}\/\d{4})/i) || [])[1]
+      ),
+      data_leitura_atual: toISO(
+        (text.match(/LEITURA\s+ATUAL[^\d]*(\d{2}\/\d{2}\/\d{4})/i) || [])[1]
+      ),
+      data_proxima_leitura,
+      data_emissao: toISO(
+        (text.match(/EMISS[ÃA]O[^\d]*(\d{2}\/\d{2}\/\d{4})/i) || [])[1]
+      ),
+      apresentacao,
+      mes_ano_referencia:
+        (text.match(/REFERENTE\s+A[^\d]*(\w{3}\/\d{4})/i) || [])[1] || null,
+      leitura_anterior: toNum(
+        (text.match(/LEITURA\s+ANTERIOR[^\d]+([\d\.\,]+)/i) || [])[1]
+      ),
+      leitura_atual: toNum(
+        (text.match(/LEITURA\s+ATUAL[^\d]+([\d\.\,]+)/i) || [])[1]
+      ),
+      beneficio_tarifario_bruto: toNum(
+        (text.match(/BENEF[ÍI]CIO\s+TARIF[ÁA]RIO\s+BRUTO[^\d]+([\d\.\,]+)/i) ||
+          [])[1]
+      ),
+      beneficio_tarifario_liquido:
+        -Math.abs(
+          toNum(
+            (text.match(
+              /BENEF[ÍI]CIO\s+TARIF[ÁA]RIO\s+L[ÍI]QUIDO[^\d]+([\d\.\,]+)/i
+            ) || [])[1]
+          ) || 0
+        ),
+      icms: toNum((text.match(/ICMS[^\d]+([\d\.\,]+)/i) || [])[1]),
+      pis_pasep: toNum((text.match(/PIS[^\d]+([\d\.\,]+)/i) || [])[1]),
+      cofins: toNum((text.match(/COFINS[^\d]+([\d\.\,]+)/i) || [])[1]),
+      fatura_debito_automatico: text.includes("DÉBITO AUTOMÁTICO")
+        ? "yes"
+        : "no",
+      credito_recebido: toNum(
+        (text.match(/CR[ÉE]DITO\s+RECEBIDO[^\d]+([\d\.\,]+)/i) || [])[1]
+      ),
+      saldo_kwh: toNum(
+        (text.match(/SALDO[^\d]+([\d\.\,]+)/i) || [])[1]
+      ),
+      excedente_recebido,
+      ciclo_geracao,
+      informacoes_para_o_cliente,
+      uc_geradora,
+      uc_geradora_producao,
       cadastro_rateio_geracao_uc: null,
       cadastro_rateio_geracao_percentual: null,
-      injecoes_scee: inj,
-      consumo_scee_quant: null,
-      consumo_scee_preco_unit_com_tributos: null,
-      consumo_scee_tarifa_unitaria: null,
-      media: med,
-      parc_injet_s_desc_percentual: null,
+      injecoes_scee: [],
+      consumo_scee_quant: toNum(
+        (text.match(/CONSUMO\s+SCEE[^\d]+([\d\.\,]+)/i) || [])[1]
+      ),
+      consumo_scee_preco_unit_com_tributos: toNum(
+        (text.match(
+          /CONSUMO\s+SCEE[^\n]+([\d\,\.]+)\s*$/im
+        ) || [])[1]
+      ),
+      consumo_scee_tarifa_unitaria: toNum(
+        (text.match(/SCEE[^\d]+([\d\,\.]+)/i) || [])[1]
+      ),
+      media,
+      parc_injet_s_desc_percentual: toNum(
+        (text.match(/PERC[^\d]+([\d\.\,]+)/i) || [])[1]
+      ),
       observacoes: ""
     };
 
-    return res.json(result);
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: String(e) });
+    res.json(resultado);
+  } catch (err) {
+    console.error("❌ Erro no processamento:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-
-
-// ======== INICIA O SERVIDOR ========
+// ===============================
+// 🔹 Inicializar servidor
+// ===============================
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
