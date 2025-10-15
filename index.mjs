@@ -1,3 +1,6 @@
+// Corrige erro da biblioteca pdf-parse no Render
+process.env.NODE_ENV = "production";
+
 // ===============================
 // 🔹 Importações básicas
 // ===============================
@@ -212,3 +215,4 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
+
