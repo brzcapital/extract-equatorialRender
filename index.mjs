@@ -1,75 +1,62 @@
-// ========================================
-// EXTRACT-EQUATORIAL v2
-// Lê o texto real de um PDF remoto via pdf2json
-// Estável no Render
-// ========================================
-
 import express from "express";
-import cors from "cors";
 import fetch from "node-fetch";
-import PDFParser from "pdf2json";
+import pdf from "pdf-parse";
+import cors from "cors";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ✅ Rota GET básica para teste rápido
-app.get("/", (req, res) => {
-  res.send("✅ Servidor ativo! Use POST /extract-text com { pdf_url }");
-});
-
-// ✅ Função para baixar e converter PDF em texto
-async function extrairTextoDoPDF(pdfUrl) {
-  const response = await fetch(pdfUrl);
-  if (!response.ok) throw new Error("Falha ao baixar PDF");
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const pdfParser = new PDFParser();
-
-  return new Promise((resolve, reject) => {
-    pdfParser.on("pdfParser_dataError", (err) => reject(err.parserError));
-    pdfParser.on("pdfParser_dataReady", (pdfData) => {
-      try {
-        // Extrai todo o texto das páginas
-        const allText = pdfData.Pages.map((page) =>
-          page.Texts.map((t) =>
-            decodeURIComponent(t.R.map((r) => r.T).join(""))
-          ).join(" ")
-        ).join("\n");
-        resolve(allText);
-      } catch (e) {
-        reject(e);
-      }
-    });
-    pdfParser.parseBuffer(buffer);
-  });
-}
-
-// ✅ Rota principal: POST /extract-text
+// 🔹 Endpoint 1 - Teste simples
 app.post("/extract-text", async (req, res) => {
   try {
     const { pdf_url } = req.body;
-    if (!pdf_url) {
-      return res.status(400).json({ erro: "Faltando campo pdf_url" });
-    }
+    if (!pdf_url) return res.status(400).json({ error: "Campo 'pdf_url' é obrigatório" });
 
-    console.log("🔗 Recebido PDF URL:", pdf_url);
-
-    const texto = await extrairTextoDoPDF(pdf_url);
+    const response = await fetch(pdf_url);
+    const buffer = await response.arrayBuffer();
+    const data = await pdf(Buffer.from(buffer));
 
     res.json({
       status: "ok",
-      tamanho_texto: texto.length,
-      amostra: texto.slice(0, 500) + "...",
+      tamanho_texto: data.text.length,
+      amostra: data.text.slice(0, 500)
     });
   } catch (error) {
-    console.error("❌ Erro ao extrair texto:", error);
-    res.status(500).json({ erro: "Falha ao extrair texto do PDF" });
+    console.error("Erro ao processar PDF:", error);
+    res.status(500).json({ error: "Falha ao extrair texto do PDF" });
   }
 });
 
-// ✅ Inicializa o servidor
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+// 🔹 Endpoint 2 - Extração estruturada
+app.post("/extract-structured", async (req, res) => {
+  try {
+    const { pdf_url } = req.body;
+    if (!pdf_url) return res.status(400).json({ error: "Campo 'pdf_url' é obrigatório" });
+
+    const response = await fetch(pdf_url);
+    const buffer = await response.arrayBuffer();
+    const data = await pdf(Buffer.from(buffer));
+    const text = data.text.replace(/\s+/g, " ").trim();
+
+    // 🔸 Aqui entram as regras de extração (simplificadas por enquanto)
+    const resultado = {
+      unidade_consumidora: text.match(/UC\s*(\d{8,})/)?.[1] || null,
+      total_a_pagar: parseFloat(text.match(/TOTAL\s*A\s*PAGAR\s*R\$\s*([\d.,]+)/i)?.[1]?.replace(",", ".") || 0),
+      data_vencimento: text.match(/VENCIMENTO\s*:? (\d{2}\/\d{2}\/\d{4})/)?.[1] || null,
+      data_emissao: text.match(/EMISSÃO\s*:? (\d{2}\/\d{2}\/\d{4})/)?.[1] || null,
+      mes_ano_referencia: text.match(/REFERÊNCIA\s*:? ([A-Z]{3}\/\d{4})/)?.[1] || null
+    };
+
+    res.json({
+      status: "ok",
+      campos_extraidos: resultado
+    });
+  } catch (error) {
+    console.error("Erro na extração estruturada:", error);
+    res.status(500).json({ error: "Falha na extração estruturada" });
+  }
 });
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
