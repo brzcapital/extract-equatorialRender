@@ -1,7 +1,7 @@
 {
   "name": "extract-equatorial",
   "version": "1.0.0",
-  "description": "Serviço para extrair texto e dados estruturados de faturas Equatorial",
+  "description": "Serviço para extrair texto e dados estruturados de faturas Equatorial Goiás",
   "main": "index.mjs",
   "type": "module",
   "scripts": {
