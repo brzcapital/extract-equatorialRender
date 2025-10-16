@@ -4,7 +4,7 @@
 
 import express from "express";
 import fetch from "node-fetch";
-import pdf from "pdf-parse";
+import pdf from "pdf-parse-fixed";
 import cors from "cors";
 
 const app = express();
@@ -85,3 +85,4 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
+
