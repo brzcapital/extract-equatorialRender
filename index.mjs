@@ -2,14 +2,19 @@ import express from "express";
 import multer from "multer";
 import cors from "cors";
 import fs from "fs";
-import pdfParse from "pdf-parse";
+
+// ✅ Importação corrigida do pdf-parse (evita erro ./test/data/05-versions-space.pdf)
+import pkg from "pdf-parse/lib/pdf-parse.js";
+const pdfParse = pkg.default || pkg;
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 const upload = multer({ dest: "uploads/" });
 
-// Função de extração baseada em regras
+// ============================================================
+// 🔍 Função principal de extração — Regras consolidadas
+// ============================================================
 function extrairCampos(texto) {
   const getMatch = (regex, group = 1) => {
     const m = texto.match(regex);
@@ -33,16 +38,15 @@ function extrairCampos(texto) {
   let beneficioLiquido = getNumber(/Benef[íi]cio Tarif[áa]rio L[íi]quido[\s:]+(-?[\d.,]+)/i);
   if (beneficioLiquido > 0) beneficioLiquido = beneficioLiquido * -1;
 
-  // injecoes SCEE simplificado
   const injecoes = [];
-  const injecaoRegex = /UC\s+(\d+)[^\d]+([\d.,]+)\s+kWh[^\d]+([\d.,]+)[^\d]+([\d.,]+)/gi;
+  const injecaoRegex = /UC\s+(\d{6,12})[^\d]+([\d.,]+)\s*kWh[^\d]+([\d.,]+)[^\d]+([\d.,]+)/gi;
   let inj;
   while ((inj = injecaoRegex.exec(texto)) !== null) {
     injecoes.push({
       uc: inj[1],
       quant_kwh: parseFloat(inj[2].replace(",", ".")),
       preco_unit_com_tributos: parseFloat(inj[3].replace(",", ".")),
-      tarifa_unitaria: parseFloat(inj[4].replace(",", ".")),
+      tarifa_unitaria: parseFloat(inj[4].replace(",", "."))
     });
   }
 
@@ -82,17 +86,21 @@ function extrairCampos(texto) {
     injecoes_scee: injecoes,
     consumo_scee_quant: getNumber(/Consumo SCEE[:\s]*([\d.,]+)/i),
     consumo_scee_preco_unit_com_tributos: getNumber(/Consumo SCEE[\s\S]*?Pre[cç]o Unit[^\d]+([\d.,]+)/i),
-    consumo_scee_tarifa_unitaria: getNumber(/Consumo SCEE[\s\S]*?Unit[^\d]+([\d.,]+)/i),
+    consumo_scee_tarifa_unitaria: getNumber(/Consumo SCEE[\s\S]*?(?:Tarifa|Unit)[^\d]+([\d.,]+)/i),
     media: getNumber(/M[eé]dia[:\s]*([\d.,]+)/i),
     parc_injet_s_desc_percentual: getNumber(/Parc[^\d]+([\d.,]+)%/i),
     observacoes: observacoes
   };
 }
 
-// Rota principal: POST /extract-pdf
+// ============================================================
+// 🧾 Endpoint principal
+// ============================================================
 app.post("/extract-pdf", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Nenhum arquivo enviado." });
+    if (!req.file) {
+      return res.status(400).json({ error: "Nenhum arquivo PDF foi enviado." });
+    }
 
     const pdfBuffer = fs.readFileSync(req.file.path);
     const data = await pdfParse(pdfBuffer);
@@ -102,12 +110,10 @@ app.post("/extract-pdf", upload.single("file"), async (req, res) => {
     fs.unlinkSync(req.file.path);
     res.json(resultado);
   } catch (err) {
-    console.error("Erro:", err);
+    console.error("Erro ao processar PDF:", err);
     res.status(500).json({ error: "Erro ao processar PDF", detalhes: err.message });
   }
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
-
-
