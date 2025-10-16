@@ -1,6 +1,5 @@
-// index.mjs — v3.7-LTS
-// Servidor de Extração Estruturada - Equatorial Goiás
-// Compatível com Node 22.x e Bubble
+// index.mjs — v3.8-LTS
+// Servidor de Extração Estruturada - Equatorial Goiás (Bubble-ready)
 
 import express from "express";
 import multer from "multer";
@@ -17,18 +16,43 @@ const PORT = process.env.PORT || 10000;
 // ✅ Health Check
 // =====================================================
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", message: "Servidor Equatorial Render v3.7-LTS ativo ✅" });
+  res.json({ status: "ok", message: "Servidor Equatorial Render v3.8-LTS ativo ✅" });
 });
 
 // =====================================================
 // 🏠 Página inicial
 // =====================================================
 app.get("/", (req, res) => {
-  res.send("✅ API Equatorial Render v3.7-LTS está online e funcional!");
+  res.send("✅ API Equatorial Render v3.8-LTS está online e funcional!");
 });
 
 // =====================================================
-// 🧠 Função principal - Comunicação com a OpenAI
+// 🔧 Util: extrair JSON do objeto de resposta da OpenAI
+// =====================================================
+function pickJsonFromResponse(openaiResult) {
+  try {
+    const out = openaiResult?.output?.[0]?.content?.[0];
+    if (!out) return null;
+    // Novo formato: objeto JSON direto
+    if (out.type === "json" && out.json) return out.json;
+    // Formato antigo: string JSON em output_text
+    if (out.type === "output_text" && typeof out.text === "string") {
+      try { return JSON.parse(out.text); } catch { /* cai pro retorno bruto abaixo */ }
+    }
+    // Algumas versões retornam array de conteúdos
+    const contentArr = openaiResult?.output?.[0]?.content;
+    if (Array.isArray(contentArr)) {
+      const jsonItem = contentArr.find(c => c.type === "json" && c.json);
+      if (jsonItem) return jsonItem.json;
+      const textItem = contentArr.find(c => c.type === "output_text" && typeof c.text === "string");
+      if (textItem) { try { return JSON.parse(textItem.text); } catch {} }
+    }
+  } catch {}
+  return null;
+}
+
+// =====================================================
+// 🧠 Função principal - Comunicação com a OpenAI (Responses API)
 // =====================================================
 async function extractWithModel(model, base64Data, apiKey) {
   const payload = {
@@ -37,7 +61,10 @@ async function extractWithModel(model, base64Data, apiKey) {
       {
         role: "system",
         content:
-          "Você é um extrator especialista em faturas da Equatorial Goiás. Extraia todos os campos exigidos no JSON final, sem inventar valores."
+          "Você é um extrator especialista em faturas da Equatorial Goiás. " +
+          "Extraia todos os campos exigidos no JSON final, sem inventar valores. " +
+          "Use ponto decimal em números, datas no formato ISO (yyyy-mm-dd) quando forem datas, " +
+          "e retorne null quando um campo não existir explicitamente."
       },
       {
         role: "user",
@@ -52,6 +79,7 @@ async function extractWithModel(model, base64Data, apiKey) {
     temperature: 0,
     text: {
       format: {
+        // ✅ Estrutura nova da API (Out/2025): exige 'name' e 'schema'
         type: "json_schema",
         name: "extrator_equatorial",
         schema: {
@@ -74,7 +102,7 @@ async function extractWithModel(model, base64Data, apiKey) {
             icms: { type: ["number", "null"] },
             pis_pasep: { type: ["number", "null"] },
             cofins: { type: ["number", "null"] },
-            fatura_debito_automatico: { type: ["string", "null"] },
+            fatura_debito_automatico: { type: ["string", "null"] }, // "yes"/"no"
             credito_recebido: { type: ["number", "null"] },
             saldo_kwh: { type: ["number", "null"] },
             excedente_recebido: { type: ["number", "null"] },
@@ -94,7 +122,9 @@ async function extractWithModel(model, base64Data, apiKey) {
                   quant_kwh: { type: ["number", "null"] },
                   preco_unit_com_tributos: { type: ["number", "null"] },
                   tarifa_unitaria: { type: ["number", "null"] }
-                }
+                },
+                // ✅ EXIGÊNCIA NOVA DA API: listar todas as chaves em 'required'
+                required: ["uc", "quant_kwh", "preco_unit_com_tributos", "tarifa_unitaria"]
               }
             },
             consumo_scee_quant: { type: ["number", "null"] },
@@ -104,6 +134,7 @@ async function extractWithModel(model, base64Data, apiKey) {
             parc_injet_s_desc_percentual: { type: ["number", "null"] },
             observacoes: { type: ["string", "null"] }
           },
+          // Mantemos todos como "required" para forçar retorno (preenchendo null quando faltar)
           required: [
             "unidade_consumidora",
             "total_a_pagar",
@@ -159,12 +190,12 @@ async function extractWithModel(model, base64Data, apiKey) {
 }
 
 // =====================================================
-// 📤 Endpoint principal - Upload PDF
+// 📤 Endpoint principal - Upload PDF (Bubble/Postman)
 // =====================================================
 app.post("/extract-pdf", upload.single("file"), async (req, res) => {
   const apiKey = req.body.api_key;
   const file = req.file;
-  const userModel = req.body.model || "gpt-4o";
+  const userModel = req.body.model || "gpt-4o"; // padrão econômico
 
   if (!apiKey) return res.status(400).json({ error: "Faltando 'api_key'." });
   if (!file) return res.status(400).json({ error: "Nenhum arquivo PDF enviado." });
@@ -178,12 +209,20 @@ app.post("/extract-pdf", upload.single("file"), async (req, res) => {
     } catch (err1) {
       console.warn(`⚠️ Falha com ${userModel}: ${err1.message}. Tentando fallback GPT-5...`);
       result = await extractWithModel("gpt-5", base64Data, apiKey);
+    } finally {
+      // remove o arquivo temporário, independente de sucesso/erro
+      try { fs.unlinkSync(file.path); } catch {}
     }
 
-    fs.unlinkSync(file.path); // remove arquivo temporário
-    res.json(result.output?.[0]?.content?.[0]?.json ?? result);
+    // Tenta extrair o JSON padronizado
+    const json = pickJsonFromResponse(result);
+    if (json) return res.json(json);
+
+    // Se não conseguir, retorna o objeto bruto para debugging
+    return res.json(result);
   } catch (error) {
     console.error("❌ Erro geral:", error);
+    try { fs.unlinkSync(file.path); } catch {}
     res.status(500).json({ error: error.message });
   }
 });
