@@ -1,4 +1,4 @@
-// index.mjs — v3.4
+// index.mjs — v3.5
 import express from "express";
 import multer from "multer";
 import dotenv from "dotenv";
@@ -11,13 +11,12 @@ const app = express();
 const upload = multer({ dest: "uploads/" });
 const PORT = process.env.PORT || 10000;
 
-// ✅ Endpoint de teste
 app.get("/", (req, res) => {
-  res.send("✅ API Equatorial Render v3.4 ativa e pronta para extração!");
+  res.send("✅ API Equatorial Render v3.5 está online e funcional!");
 });
 
 // ======================================================
-// 📦 Função auxiliar para envio à OpenAI (com fallback)
+// 📦 Função principal de comunicação com OpenAI
 // ======================================================
 async function extractWithModel(model, base64Data, apiKey) {
   const payload = {
@@ -35,7 +34,7 @@ async function extractWithModel(model, base64Data, apiKey) {
         content: [
           {
             type: "input_text",
-            text: `Leia o PDF em base64 e extraia os dados da fatura Equatorial: ${base64Data}`
+            text: `Leia o PDF (em base64) e extraia os dados estruturados da fatura Equatorial: ${base64Data}`
           }
         ]
       }
@@ -43,6 +42,8 @@ async function extractWithModel(model, base64Data, apiKey) {
     temperature: 0,
     text: {
       format: {
+        // 👇 NOVO campo exigido pela API (corrige o erro “Missing required parameter: 'text.format.name'.”)
+        name: "extrator_equatorial",
         type: "json_schema",
         json_schema: {
           name: "fatura_equatorial",
@@ -152,12 +153,12 @@ async function extractWithModel(model, base64Data, apiKey) {
 }
 
 // ======================================================
-// 🧠 Rota principal de extração
+// 🧠 Rota principal
 // ======================================================
 app.post("/extract-pdf", upload.single("file"), async (req, res) => {
   const apiKey = req.body.api_key;
   const file = req.file;
-  const userModel = req.body.model || "gpt-4o"; // padrão = GPT-4o
+  const userModel = req.body.model || "gpt-4o"; // padrão GPT-4o
 
   if (!apiKey) return res.status(400).json({ error: "Faltando 'api_key'." });
   if (!file) return res.status(400).json({ error: "Nenhum arquivo PDF enviado." });
@@ -170,11 +171,9 @@ app.post("/extract-pdf", upload.single("file"), async (req, res) => {
 
     let result;
     try {
-      // tentativa 1 — modelo escolhido (padrão GPT-4o)
       result = await extractWithModel(userModel, base64Data, apiKey);
     } catch (err1) {
       console.warn(`⚠️ Falha com ${userModel}: ${err1.message}. Tentando fallback para GPT-5...`);
-      // tentativa 2 — fallback GPT-5
       result = await extractWithModel("gpt-5", base64Data, apiKey);
     }
 
@@ -186,6 +185,4 @@ app.post("/extract-pdf", upload.single("file"), async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
