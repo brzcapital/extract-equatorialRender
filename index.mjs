@@ -4,12 +4,22 @@
 
 import express from "express";
 import fetch from "node-fetch";
-import pdf from "pdf-parse-fixed";
 import cors from "cors";
+import fs from "fs";
+import pdf from "pdf-parse";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// PATCH para evitar bug do pdf-parse com arquivo interno inexistente
+const originalReadFileSync = fs.readFileSync;
+fs.readFileSync = function (path, options) {
+  if (path.includes("test/data/05-versions-space.pdf")) {
+    return Buffer.from(""); // ignora arquivo de teste interno
+  }
+  return originalReadFileSync.apply(this, arguments);
+};
 
 // =======================================
 // 🔹 TESTE BÁSICO DE FUNCIONAMENTO
@@ -31,7 +41,7 @@ app.post("/extract-text", async (req, res) => {
     res.json({
       status: "ok",
       tamanho_texto: data.text.length,
-      amostra: data.text.slice(0, 500) // primeira amostra do texto
+      amostra: data.text.slice(0, 300)
     });
   } catch (error) {
     console.error("❌ Erro ao processar PDF:", error.message);
@@ -45,10 +55,7 @@ app.post("/extract-text", async (req, res) => {
 app.post("/extract-structured", async (req, res) => {
   try {
     const { pdf_url } = req.body;
-
-    if (!pdf_url) {
-      return res.status(400).json({ error: "Campo 'pdf_url' é obrigatório" });
-    }
+    if (!pdf_url) return res.status(400).json({ error: "Campo 'pdf_url' é obrigatório" });
 
     const response = await fetch(pdf_url);
     if (!response.ok) throw new Error("Falha ao baixar o PDF");
@@ -57,7 +64,7 @@ app.post("/extract-structured", async (req, res) => {
     const data = await pdf(Buffer.from(buffer));
     const text = data.text.replace(/\s+/g, " ").trim();
 
-    // Regras básicas (vamos refinar depois)
+    // Regras simples — serão refinadas depois
     const resultado = {
       unidade_consumidora: text.match(/UC\s*(\d{6,})/)?.[1] || null,
       total_a_pagar: parseFloat(
@@ -85,4 +92,3 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
-
