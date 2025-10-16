@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^4.3.136",
     "node-fetch": "^3.3.2",
     "cors": "^2.8.5"
   },
@@ -17,4 +17,3 @@
     "node": ">=18"
   }
 }
-
