@@ -1,96 +1,146 @@
-// ============================
-// EXTRACT-EQUATORIAL (Render)
-// ============================
-
 import express from "express";
-import fetch from "node-fetch";
+import multer from "multer";
+import fs from "fs";
+import path from "path";
+import pdf from "pdf-parse";
 import cors from "cors";
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
 
 const app = express();
+const upload = multer({ dest: "uploads/" });
+const PORT = process.env.PORT || 10000;
+
 app.use(cors());
 app.use(express.json());
 
-// ============================
-// 🔹 Função auxiliar para extrair texto
-// ============================
-async function extractTextFromPDF(buffer) {
-  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-  let textContent = "";
-
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-    const page = await pdf.getPage(pageNum);
-    const content = await page.getTextContent();
-    const strings = content.items.map((item) => item.str);
-    textContent += strings.join(" ") + "\n";
-  }
-
-  return textContent.trim();
+// Função auxiliar para normalizar texto
+function limparTexto(text) {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/R\$/g, "")
+    .replace(/,/g, ".")
+    .trim();
 }
 
-// =======================================
-// 🔹 TESTE BÁSICO
-// =======================================
-app.post("/extract-text", async (req, res) => {
+// Função principal de extração estruturada
+async function extrairCampos(texto) {
+  const result = {
+    unidade_consumidora: null,
+    total_a_pagar: null,
+    data_vencimento: null,
+    data_leitura_anterior: null,
+    data_leitura_atual: null,
+    data_proxima_leitura: null,
+    data_emissao: null,
+    apresentacao: null,
+    mes_ano_referencia: null,
+    leitura_anterior: null,
+    leitura_atual: null,
+    beneficio_tarifario_bruto: null,
+    beneficio_tarifario_liquido: null,
+    icms: null,
+    pis_pasep: null,
+    cofins: null,
+    fatura_debito_automatico: null,
+    credito_recebido: null,
+    saldo_kwh: null,
+    excedente_recebido: null,
+    ciclo_geracao: null,
+    informacoes_para_o_cliente: null,
+    uc_geradora: null,
+    uc_geradora_producao: null,
+    cadastro_rateio_geracao_uc: null,
+    cadastro_rateio_geracao_percentual: null,
+    injecoes_scee: [],
+    consumo_scee_quant: null,
+    consumo_scee_preco_unit_com_tributos: null,
+    consumo_scee_tarifa_unitaria: null,
+    media: null,
+    parc_injet_s_desc_percentual: null,
+    observacoes: ""
+  };
+
   try {
-    const { pdf_url } = req.body;
-    if (!pdf_url) return res.status(400).json({ error: "Campo 'pdf_url' é obrigatório" });
+    const t = limparTexto(texto);
 
-    const response = await fetch(pdf_url);
-    if (!response.ok) throw new Error("Falha ao baixar o PDF");
+    result.unidade_consumidora = t.match(/Unidade\s+Consumidora\s+(\d+)/i)?.[1] || null;
+    result.total_a_pagar = parseFloat(t.match(/Total\s+a\s+Pagar\s+([\d.,]+)/i)?.[1] || null);
+    result.data_vencimento = t.match(/Vencimento\s+(\d{2}\/\d{2}\/\d{4})/i)?.[1] || null;
+    result.data_leitura_anterior = t.match(/Leitura\s+Anterior\s+(\d{2}\/\d{2}\/\d{4})/i)?.[1] || null;
+    result.data_leitura_atual = t.match(/Leitura\s+Atual\s+(\d{2}\/\d{2}\/\d{4})/i)?.[1] || null;
+    result.data_proxima_leitura = t.match(/Pr[oó]xima\s+Leitura\s+(\d{2}\/\d{2}\/\d{4})/i)?.[1] || null;
+    result.data_emissao = t.match(/Emiss[aã]o\s+(\d{2}\/\d{2}\/\d{4})/i)?.[1] || null;
+    result.apresentacao = t.match(/Apresenta[cç][aã]o\s+(\d{2}\/\d{2}\/\d{4})/i)?.[1] || null;
+    result.mes_ano_referencia = t.match(/Refer[eê]ncia\s+(\w+\/\d{4})/i)?.[1] || null;
 
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const text = await extractTextFromPDF(buffer);
+    result.leitura_anterior = parseFloat(t.match(/Leitura\s+Anterior\s+(\d+)/i)?.[1] || null);
+    result.leitura_atual = parseFloat(t.match(/Leitura\s+Atual\s+(\d+)/i)?.[1] || null);
 
+    result.beneficio_tarifario_bruto = parseFloat(t.match(/Benef[ií]cio\s+Bruto\s+([\d.,]+)/i)?.[1] || null);
+    result.beneficio_tarifario_liquido = -Math.abs(
+      parseFloat(t.match(/Benef[ií]cio\s+L[ií]quido\s+([\d.,]+)/i)?.[1] || 0)
+    );
+
+    result.icms = parseFloat(t.match(/ICMS\s+([\d.,]+)/i)?.[1] || 0);
+    result.pis_pasep = parseFloat(t.match(/PIS\/PASEP\s+([\d.,]+)/i)?.[1] || 0);
+    result.cofins = parseFloat(t.match(/COFINS\s+([\d.,]+)/i)?.[1] || 0);
+
+    result.fatura_debito_automatico = /Débito\s+Automático/i.test(t) ? "yes" : "no";
+    result.credito_recebido = parseFloat(t.match(/Cr[eé]dito\s+Recebido\s+([\d.,]+)/i)?.[1] || 0);
+    result.saldo_kwh = parseFloat(t.match(/Saldo\s+de\s+Energia\s+([\d.,]+)/i)?.[1] || 0);
+    result.excedente_recebido = parseFloat(t.match(/Excedente\s+Recebido\s+([\d.,]+)/i)?.[1] || 0);
+
+    result.ciclo_geracao = t.match(/Ciclo\s+de\s+Gera[cç][aã]o\s+\(?(\d+\/\d+)\)?/i)?.[1] || null;
+    result.informacoes_para_o_cliente = t.match(/Informa[cç][oõ]es\s+para\s+o\s+Cliente[:\-]?\s*(.*?)\s*(?:UC\s+Geradora|CADASTRO)/i)?.[1] || "";
+
+    result.uc_geradora = t.match(/UC\s+Geradora\s+(\d+)/i)?.[1] || null;
+    result.uc_geradora_producao = parseFloat(t.match(/UC\s+Geradora\s+\d+\s*[:\-]\s*([\d.,]+)/i)?.[1] || 0);
+    result.cadastro_rateio_geracao_uc = t.match(/Cadastro\s+de\s+Rateio\s+de\s+Gera[cç][aã]o\s+UC\s+(\d+)/i)?.[1] || null;
+    result.cadastro_rateio_geracao_percentual = parseFloat(
+      t.match(/Cadastro\s+de\s+Rateio\s+de\s+Gera[cç][aã]o\s+Percentual\s+([\d.,]+)/i)?.[1] || 0
+    );
+
+    result.media = parseFloat(t.match(/M[eé]dia\s+([\d.,]+)/i)?.[1] || null);
+    result.parc_injet_s_desc_percentual = parseFloat(
+      t.match(/Parc\.?\s*Injet\s*.*?([\d.,]+)%/i)?.[1] || null
+    );
+
+    return result;
+  } catch (err) {
+    console.error("Erro na extração:", err);
+    return result;
+  }
+}
+
+// Endpoint simples para teste de leitura
+app.post("/extract-text", upload.single("pdf"), async (req, res) => {
+  try {
+    const dataBuffer = fs.readFileSync(req.file.path);
+    const pdfData = await pdf(dataBuffer);
     res.json({
       status: "ok",
-      tamanho_texto: text.length,
-      amostra: text.slice(0, 500)
+      tamanho_texto: pdfData.text.length,
+      amostra: pdfData.text.substring(0, 300)
     });
-  } catch (error) {
-    console.error("❌ Erro ao processar PDF:", error.message);
-    res.status(500).json({ error: "Falha ao extrair texto do PDF", detalhes: error.message });
+    fs.unlinkSync(req.file.path);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// =======================================
-// 🔹 EXTRAÇÃO ESTRUTURADA (BÁSICA)
-// =======================================
-app.post("/extract-structured", async (req, res) => {
+// Endpoint principal – JSON estruturado completo
+app.post("/extract-structured", upload.single("pdf"), async (req, res) => {
   try {
-    const { pdf_url } = req.body;
-    if (!pdf_url) return res.status(400).json({ error: "Campo 'pdf_url' é obrigatório" });
-
-    const response = await fetch(pdf_url);
-    if (!response.ok) throw new Error("Falha ao baixar o PDF");
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const text = await extractTextFromPDF(buffer);
-    const cleanText = text.replace(/\s+/g, " ").trim();
-
-    // Campos simples
-    const resultado = {
-      unidade_consumidora: cleanText.match(/UC\s*(\d{6,})/)?.[1] || null,
-      total_a_pagar: parseFloat(
-        cleanText.match(/TOTAL\s*A\s*PAGAR\s*R\$\s*([\d.,]+)/i)?.[1]?.replace(",", ".") || 0
-      ),
-      data_vencimento: cleanText.match(/VENCIMENTO[:\s]+(\d{2}\/\d{2}\/\d{4})/)?.[1] || null,
-      data_emissao: cleanText.match(/EMISS[AÃ]O[:\s]+(\d{2}\/\d{2}\/\d{4})/)?.[1] || null,
-      mes_ano_referencia: cleanText.match(/REFER[ÊE]NCIA[:\s]+([A-Z]{3}\/\d{4})/)?.[1] || null
-    };
-
-    res.json({
-      status: "ok",
-      campos_extraidos: resultado
-    });
-  } catch (error) {
-    console.error("❌ Erro na extração estruturada:", error.message);
-    res.status(500).json({ error: "Falha na extração estruturada", detalhes: error.message });
+    const dataBuffer = fs.readFileSync(req.file.path);
+    const pdfData = await pdf(dataBuffer);
+    const structured = await extrairCampos(pdfData.text);
+    res.json(structured);
+    fs.unlinkSync(req.file.path);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// =======================================
-// 🔹 SERVER LISTEN
-// =======================================
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+});
+
