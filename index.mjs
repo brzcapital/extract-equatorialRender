@@ -2,7 +2,8 @@ import express from "express";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
-import pdf from "pdf-parse";
+import pkg from "pdf-parse/lib/pdf-parse.js";
+const pdf = pkg.default || pkg;
 import cors from "cors";
 
 const app = express();
@@ -143,4 +144,5 @@ app.post("/extract-structured", upload.single("pdf"), async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
+
 
