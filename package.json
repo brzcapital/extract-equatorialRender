@@ -1,7 +1,7 @@
 {
   "name": "extract-equatorialRender",
   "version": "1.0.0",
-  "description": "API de extração de faturas Equatorial Goiás com GPT-5",
+  "description": "API de extração de faturas Equatorial Goiás com GPT-4o/GPT-5 (Bubble-ready)",
   "main": "index.mjs",
   "type": "module",
   "engines": {
@@ -11,9 +11,9 @@
     "start": "node index.mjs"
   },
   "dependencies": {
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
-    "dotenv": "^16.4.5",
     "node-fetch": "^3.3.2"
   }
 }
