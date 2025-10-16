@@ -3,7 +3,7 @@
 
 import express from "express";
 import multer from "multer";
-import pdfParse from "pdf-parse";
+import pdfParse from "pdf-parse-fixed";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
 import fs from "fs";
@@ -157,3 +157,4 @@ app.get("/health", (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
+
