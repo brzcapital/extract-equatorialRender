@@ -1,5 +1,5 @@
-// index.mjs — v3.8-LTS
-// Servidor de Extração Estruturada - Equatorial Goiás (Bubble-ready)
+// index.mjs — v3.9-LTS
+// Servidor de Extração Estruturada - Equatorial Goiás (Render + Bubble Ready)
 
 import express from "express";
 import multer from "multer";
@@ -16,14 +16,14 @@ const PORT = process.env.PORT || 10000;
 // ✅ Health Check
 // =====================================================
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", message: "Servidor Equatorial Render v3.8-LTS ativo ✅" });
+  res.json({ status: "ok", message: "Servidor Equatorial Render v3.9-LTS ativo ✅" });
 });
 
 // =====================================================
 // 🏠 Página inicial
 // =====================================================
 app.get("/", (req, res) => {
-  res.send("✅ API Equatorial Render v3.8-LTS está online e funcional!");
+  res.send("✅ API Equatorial Render v3.9-LTS está online e funcional!");
 });
 
 // =====================================================
@@ -33,18 +33,15 @@ function pickJsonFromResponse(openaiResult) {
   try {
     const out = openaiResult?.output?.[0]?.content?.[0];
     if (!out) return null;
-    // Novo formato: objeto JSON direto
     if (out.type === "json" && out.json) return out.json;
-    // Formato antigo: string JSON em output_text
     if (out.type === "output_text" && typeof out.text === "string") {
-      try { return JSON.parse(out.text); } catch { /* cai pro retorno bruto abaixo */ }
+      try { return JSON.parse(out.text); } catch {}
     }
-    // Algumas versões retornam array de conteúdos
-    const contentArr = openaiResult?.output?.[0]?.content;
-    if (Array.isArray(contentArr)) {
-      const jsonItem = contentArr.find(c => c.type === "json" && c.json);
+    const arr = openaiResult?.output?.[0]?.content;
+    if (Array.isArray(arr)) {
+      const jsonItem = arr.find(c => c.type === "json" && c.json);
       if (jsonItem) return jsonItem.json;
-      const textItem = contentArr.find(c => c.type === "output_text" && typeof c.text === "string");
+      const textItem = arr.find(c => c.type === "output_text" && typeof c.text === "string");
       if (textItem) { try { return JSON.parse(textItem.text); } catch {} }
     }
   } catch {}
@@ -63,8 +60,7 @@ async function extractWithModel(model, base64Data, apiKey) {
         content:
           "Você é um extrator especialista em faturas da Equatorial Goiás. " +
           "Extraia todos os campos exigidos no JSON final, sem inventar valores. " +
-          "Use ponto decimal em números, datas no formato ISO (yyyy-mm-dd) quando forem datas, " +
-          "e retorne null quando um campo não existir explicitamente."
+          "Use ponto decimal em números, datas no formato ISO (yyyy-mm-dd), e 'null' quando o dado não existir."
       },
       {
         role: "user",
@@ -76,10 +72,8 @@ async function extractWithModel(model, base64Data, apiKey) {
         ]
       }
     ],
-    temperature: 0,
     text: {
       format: {
-        // ✅ Estrutura nova da API (Out/2025): exige 'name' e 'schema'
         type: "json_schema",
         name: "extrator_equatorial",
         schema: {
@@ -102,7 +96,7 @@ async function extractWithModel(model, base64Data, apiKey) {
             icms: { type: ["number", "null"] },
             pis_pasep: { type: ["number", "null"] },
             cofins: { type: ["number", "null"] },
-            fatura_debito_automatico: { type: ["string", "null"] }, // "yes"/"no"
+            fatura_debito_automatico: { type: ["string", "null"] },
             credito_recebido: { type: ["number", "null"] },
             saldo_kwh: { type: ["number", "null"] },
             excedente_recebido: { type: ["number", "null"] },
@@ -123,7 +117,6 @@ async function extractWithModel(model, base64Data, apiKey) {
                   preco_unit_com_tributos: { type: ["number", "null"] },
                   tarifa_unitaria: { type: ["number", "null"] }
                 },
-                // ✅ EXIGÊNCIA NOVA DA API: listar todas as chaves em 'required'
                 required: ["uc", "quant_kwh", "preco_unit_com_tributos", "tarifa_unitaria"]
               }
             },
@@ -134,7 +127,6 @@ async function extractWithModel(model, base64Data, apiKey) {
             parc_injet_s_desc_percentual: { type: ["number", "null"] },
             observacoes: { type: ["string", "null"] }
           },
-          // Mantemos todos como "required" para forçar retorno (preenchendo null quando faltar)
           required: [
             "unidade_consumidora",
             "total_a_pagar",
@@ -190,18 +182,18 @@ async function extractWithModel(model, base64Data, apiKey) {
 }
 
 // =====================================================
-// 📤 Endpoint principal - Upload PDF (Bubble/Postman)
+// 📤 Endpoint principal - Upload PDF
 // =====================================================
 app.post("/extract-pdf", upload.single("file"), async (req, res) => {
   const apiKey = req.body.api_key;
   const file = req.file;
-  const userModel = req.body.model || "gpt-4o"; // padrão econômico
+  const userModel = req.body.model || "gpt-4o"; // modelo padrão econômico
 
   if (!apiKey) return res.status(400).json({ error: "Faltando 'api_key'." });
   if (!file) return res.status(400).json({ error: "Nenhum arquivo PDF enviado." });
 
   try {
-    const base64Data = fs.readFileSync(file.path, "base64");
+    const base64Data = fs.readFileSync(file.path, { encoding: "base64" });
 
     let result;
     try {
@@ -210,16 +202,12 @@ app.post("/extract-pdf", upload.single("file"), async (req, res) => {
       console.warn(`⚠️ Falha com ${userModel}: ${err1.message}. Tentando fallback GPT-5...`);
       result = await extractWithModel("gpt-5", base64Data, apiKey);
     } finally {
-      // remove o arquivo temporário, independente de sucesso/erro
       try { fs.unlinkSync(file.path); } catch {}
     }
 
-    // Tenta extrair o JSON padronizado
     const json = pickJsonFromResponse(result);
     if (json) return res.json(json);
-
-    // Se não conseguir, retorna o objeto bruto para debugging
-    return res.json(result);
+    res.json(result);
   } catch (error) {
     console.error("❌ Erro geral:", error);
     try { fs.unlinkSync(file.path); } catch {}
