@@ -1,7 +1,7 @@
 {
   "name": "extract-equatorialRender",
   "version": "1.0.0",
-  "description": "Servidor híbrido Equatorial Goiás (parser + GPT)",
+  "description": "Servidor híbrido Equatorial Goiás com GPT-4-Turbo",
   "main": "index.mjs",
   "type": "module",
   "scripts": {
