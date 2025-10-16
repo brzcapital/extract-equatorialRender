@@ -1,9 +1,7 @@
-import zipfile
-import io
+// index.mjs — v3.7-LTS
+// Servidor de Extração Estruturada - Equatorial Goiás
+// Compatível com Node 22.x e Bubble
 
-# Conteúdo do index.mjs corrigido
-index_mjs_content = """\
-// index.mjs — v3.6 (compatível com text.format.schema)
 import express from "express";
 import multer from "multer";
 import dotenv from "dotenv";
@@ -11,24 +9,27 @@ import fetch from "node-fetch";
 import fs from "fs";
 
 dotenv.config();
-
 const app = express();
 const upload = multer({ dest: "uploads/" });
 const PORT = process.env.PORT || 10000;
 
-// 🔹 Rota de teste (health check)
+// =====================================================
+// ✅ Health Check
+// =====================================================
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", message: "Servidor Equatorial Render v3.6 ativo ✅" });
+  res.json({ status: "ok", message: "Servidor Equatorial Render v3.7-LTS ativo ✅" });
 });
 
-// 🔹 Rota padrão (home)
+// =====================================================
+// 🏠 Página inicial
+// =====================================================
 app.get("/", (req, res) => {
-  res.send("✅ API Equatorial Render v3.6 está online e funcional!");
+  res.send("✅ API Equatorial Render v3.7-LTS está online e funcional!");
 });
 
-// ======================================================
-// 📦 Função principal de comunicação com OpenAI
-// ======================================================
+// =====================================================
+// 🧠 Função principal - Comunicação com a OpenAI
+// =====================================================
 async function extractWithModel(model, base64Data, apiKey) {
   const payload = {
     model,
@@ -36,7 +37,7 @@ async function extractWithModel(model, base64Data, apiKey) {
       {
         role: "system",
         content:
-          "Você é um extrator especialista em faturas da Equatorial Goiás. Extraia todos os campos exigidos no JSON."
+          "Você é um extrator especialista em faturas da Equatorial Goiás. Extraia todos os campos exigidos no JSON final, sem inventar valores."
       },
       {
         role: "user",
@@ -157,9 +158,9 @@ async function extractWithModel(model, base64Data, apiKey) {
   return result;
 }
 
-// ======================================================
-// 🧠 Rota principal — upload PDF
-// ======================================================
+// =====================================================
+// 📤 Endpoint principal - Upload PDF
+// =====================================================
 app.post("/extract-pdf", upload.single("file"), async (req, res) => {
   const apiKey = req.body.api_key;
   const file = req.file;
@@ -169,8 +170,7 @@ app.post("/extract-pdf", upload.single("file"), async (req, res) => {
   if (!file) return res.status(400).json({ error: "Nenhum arquivo PDF enviado." });
 
   try {
-    const fileData = fs.readFileSync(file.path);
-    const base64Data = Buffer.from(fileData).toString("base64");
+    const base64Data = fs.readFileSync(file.path, "base64");
 
     let result;
     try {
@@ -180,7 +180,7 @@ app.post("/extract-pdf", upload.single("file"), async (req, res) => {
       result = await extractWithModel("gpt-5", base64Data, apiKey);
     }
 
-    fs.unlinkSync(file.path);
+    fs.unlinkSync(file.path); // remove arquivo temporário
     res.json(result.output?.[0]?.content?.[0]?.json ?? result);
   } catch (error) {
     console.error("❌ Erro geral:", error);
@@ -188,35 +188,9 @@ app.post("/extract-pdf", upload.single("file"), async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
-"""
-
-# Conteúdo do package.json
-package_json_content = """{
-  "name": "extract-equatorialRender",
-  "version": "1.0.0",
-  "description": "API de extração de faturas Equatorial Goiás com GPT-5",
-  "main": "index.mjs",
-  "type": "module",
-  "scripts": {
-    "start": "node index.mjs"
-  },
-  "dependencies": {
-    "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1",
-    "dotenv": "^16.4.5",
-    "node-fetch": "^3.3.2"
-  }
-}
-"""
-
-# Criar o arquivo ZIP em memória
-zip_buffer = io.BytesIO()
-with zipfile.ZipFile(zip_buffer, "w") as zf:
-    zf.writestr("index.mjs", index_mjs_content)
-    zf.writestr("package.json", package_json_content)
-
-zip_buffer.seek(0)
-zip_buffer.name = "extract-equatorialRender-v3.6.zip"
-zip_buffer
-
+// =====================================================
+// 🚀 Inicialização do servidor
+// =====================================================
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+});
