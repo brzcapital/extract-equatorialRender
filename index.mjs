@@ -1,160 +1,173 @@
-// index.mjs — v4.5-Hybrid-LTS
-// Servidor híbrido (parser local + fallback GPT-4o) para faturas Equatorial Goiás
-
 import express from "express";
 import multer from "multer";
 import pdfParse from "pdf-parse-fixed";
-import dotenv from "dotenv";
 import fetch from "node-fetch";
-import fs from "fs";
+import dotenv from "dotenv";
 
 dotenv.config();
+
 const app = express();
-const upload = multer({ dest: "uploads/" });
-const PORT = process.env.PORT || 10000;
+const upload = multer({ storage: multer.memoryStorage() });
 
-// ==========================
-// 🔹 Funções utilitárias
-// ==========================
-function limparTexto(txt) {
-  return txt.replace(/\s+/g, " ").trim();
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+
+// ===================
+// Função: Extrai texto do PDF (apenas 1ª página)
+// ===================
+async function extractTextFromPDF(buffer) {
+  const data = await pdfParse(buffer);
+  const text = data.text || "";
+  const firstPageText = text.split(/\f/g)[0] || text;
+  return firstPageText.trim();
 }
 
-function extrairCampo(regex, texto, parseFn = x => x) {
-  const match = texto.match(regex);
-  return match ? parseFn(match[1]) : null;
-}
-
-function toNumber(str) {
-  if (!str) return null;
-  const num = parseFloat(str.replace(/\./g, "").replace(",", "."));
-  return isNaN(num) ? null : num;
-}
-
-// ==========================
-// 🧩 Parser Local (sem GPT)
-// ==========================
-async function extrairCamposLocais(pdfBuffer) {
-  const data = await pdfParse(pdfBuffer);
-  const texto = limparTexto(data.text);
-
-  return {
-    unidade_consumidora: extrairCampo(/Unidade Consumidora[:\s]+(\d+)/i, texto),
-    total_a_pagar: toNumber(extrairCampo(/Total a Pagar(?:.*?)?R\$\s*([\d.,]+)/i, texto)),
-    data_vencimento: extrairCampo(/Vencimento[:\s]+(\d{2}\/\d{2}\/\d{4})/i, texto),
-    data_leitura_anterior: extrairCampo(/Leitura Anterior[:\s]+(\d{2}\/\d{2}\/\d{4})/i, texto),
-    data_leitura_atual: extrairCampo(/Leitura Atual[:\s]+(\d{2}\/\d{2}\/\d{4})/i, texto),
-    data_proxima_leitura: extrairCampo(/Próxima Leitura[:\s]+(\d{2}\/\d{2}\/\d{4})/i, texto),
-    data_emissao: extrairCampo(/Emissão[:\s]+(\d{2}\/\d{2}\/\d{4})/i, texto),
-    apresentacao: extrairCampo(/Apresentação[:\s]+(\d{2}\/\d{2}\/\d{4})/i, texto),
-    mes_ano_referencia: extrairCampo(/Referente a[:\s]+([A-Z]{3}\/\d{2,4})/i, texto),
-    leitura_anterior: toNumber(extrairCampo(/Leitura Anterior\s+(\d+)/i, texto)),
-    leitura_atual: toNumber(extrairCampo(/Leitura Atual\s+(\d+)/i, texto)),
-    beneficio_tarifario_bruto: toNumber(extrairCampo(/Benefício Tarifário.*?R\$\s*([\d.,]+)/i, texto)),
-    beneficio_tarifario_liquido: toNumber(extrairCampo(/Benefício Tarifário Líquido.*?R\$\s*([\d.,]+)/i, texto)),
-    icms: toNumber(extrairCampo(/ICMS[:\s]+([\d.,]+)/i, texto)),
-    pis_pasep: toNumber(extrairCampo(/PIS[\/\s]PASEP[:\s]+([\d.,]+)/i, texto)),
-    cofins: toNumber(extrairCampo(/COFINS[:\s]+([\d.,]+)/i, texto)),
-    fatura_debito_automatico: /débito automático/i.test(texto) ? "yes" : "no",
-    credito_recebido: toNumber(extrairCampo(/Crédito Recebido[:\s]+([\d.,]+)/i, texto)),
-    saldo_kwh: toNumber(extrairCampo(/Saldo.*?([\d.,]+)\s*kWh/i, texto)),
-    excedente_recebido: toNumber(extrairCampo(/Excedente.*?([\d.,]+)\s*kWh/i, texto)),
-    ciclo_geracao: extrairCampo(/Ciclo de Geração[:\s]+([A-Za-z0-9\/]+)/i, texto),
-    informacoes_para_o_cliente: extrairCampo(/Informações para o Cliente[:\s]*(.+)$/i, texto, limparTexto),
-    uc_geradora: extrairCampo(/UC Geradora[:\s]+(\d+)/i, texto),
-    uc_geradora_producao: toNumber(extrairCampo(/Produção[:\s]+([\d.,]+)\s*kWh/i, texto)),
-    cadastro_rateio_geracao_uc: extrairCampo(/Rateio UC[:\s]+(\d+)/i, texto),
-    cadastro_rateio_geracao_percentual: toNumber(extrairCampo(/Percentual[:\s]+([\d.,]+)/i, texto)),
-    injecoes_scee: [],
-    consumo_scee_quant: toNumber(extrairCampo(/Consumo SCEE[:\s]+([\d.,]+)/i, texto)),
-    consumo_scee_preco_unit_com_tributos: toNumber(extrairCampo(/Preço Unit.*?Tributos[:\s]+([\d.,]+)/i, texto)),
-    consumo_scee_tarifa_unitaria: toNumber(extrairCampo(/Tarifa Unitária[:\s]+([\d.,]+)/i, texto)),
-    media: toNumber(extrairCampo(/Média[:\s]+([\d.,]+)/i, texto)),
-    parc_injet_s_desc_percentual: toNumber(extrairCampo(/Percentual[:\s]+([\d.,]+)/i, texto)) || 0,
-    observacoes: extrairCampo(/Observações[:\s]*(.+)$/i, texto, limparTexto)
-  };
-}
-
-// ==========================
-// 🔹 Fallback GPT-4o
-// ==========================
-async function completarComGPT4(camposParciais, texto, apiKey) {
-  const camposNulos = Object.keys(camposParciais).filter(k => !camposParciais[k]);
-  if (camposNulos.length === 0) return camposParciais;
-
-  console.log("⚙️ Enviando ao GPT apenas campos faltantes:", camposNulos);
-
+// ===================
+// Função: GPT-4-Turbo (análise inteligente)
+// ===================
+async function callGPTAnalysis(pdfText, apiKey) {
   const payload = {
-    model: "gpt-4o",
+    model: "gpt-4-turbo",
     input: [
       {
         role: "system",
-        content: "Você é um extrator de dados de faturas Equatorial Goiás. Preencha apenas os campos faltantes."
+        content:
+          "Você é um extrator de dados de faturas Equatorial Goiás. Retorne UM ÚNICO objeto JSON com todos os campos obrigatórios, mesmo que vazios (null ou 0). Nenhuma invenção de valores.",
       },
       {
         role: "user",
-        content: [
-          { type: "input_text", text: `Fatura: ${texto}\n\nCampos faltantes: ${camposNulos.join(", ")}` }
-        ]
+        content:
+          "Extraia os seguintes campos da fatura (em português): unidade_consumidora, total_a_pagar, data_vencimento, data_leitura_anterior, data_leitura_atual, data_proxima_leitura, data_emissao, apresentacao, mes_ano_referencia, leitura_anterior, leitura_atual, beneficio_tarifario_bruto, beneficio_tarifario_liquido, icms, pis_pasep, cofins, fatura_debito_automatico, credito_recebido, saldo_kwh, excedente_recebido, ciclo_geracao, informacoes_para_o_cliente, uc_geradora, uc_geradora_producao, cadastro_rateio_geracao_uc, cadastro_rateio_geracao_percentual, injecoes_scee (lista de objetos com uc, quant_kwh, preco_unit_com_tributos, tarifa_unitaria), consumo_scee_quant, consumo_scee_preco_unit_com_tributos, consumo_scee_tarifa_unitaria, media, parc_injet_s_desc_percentual, observacoes.\n\nTexto da fatura:\n" +
+          pdfText,
+      },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "extrator_equatorial",
+        schema: {
+          type: "object",
+          properties: {
+            unidade_consumidora: { type: ["string", "null"] },
+            total_a_pagar: { type: ["number", "null"] },
+            data_vencimento: { type: ["string", "null"] },
+            data_leitura_anterior: { type: ["string", "null"] },
+            data_leitura_atual: { type: ["string", "null"] },
+            data_proxima_leitura: { type: ["string", "null"] },
+            data_emissao: { type: ["string", "null"] },
+            apresentacao: { type: ["string", "null"] },
+            mes_ano_referencia: { type: ["string", "null"] },
+            leitura_anterior: { type: ["number", "null"] },
+            leitura_atual: { type: ["number", "null"] },
+            beneficio_tarifario_bruto: { type: ["number", "null"] },
+            beneficio_tarifario_liquido: { type: ["number", "null"] },
+            icms: { type: ["number", "null"] },
+            pis_pasep: { type: ["number", "null"] },
+            cofins: { type: ["number", "null"] },
+            fatura_debito_automatico: { type: "string" },
+            credito_recebido: { type: ["number", "null"] },
+            saldo_kwh: { type: ["number", "null"] },
+            excedente_recebido: { type: ["number", "null"] },
+            ciclo_geracao: { type: ["string", "null"] },
+            informacoes_para_o_cliente: { type: ["string", "null"] },
+            uc_geradora: { type: ["string", "null"] },
+            uc_geradora_producao: { type: ["number", "null"] },
+            cadastro_rateio_geracao_uc: { type: ["string", "null"] },
+            cadastro_rateio_geracao_percentual: { type: ["number", "null"] },
+            injecoes_scee: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  uc: { type: "string" },
+                  quant_kwh: { type: "number" },
+                  preco_unit_com_tributos: { type: "number" },
+                  tarifa_unitaria: { type: "number" }
+                },
+                required: ["uc", "quant_kwh", "preco_unit_com_tributos", "tarifa_unitaria"],
+                additionalProperties: false
+              }
+            },
+            consumo_scee_quant: { type: ["number", "null"] },
+            consumo_scee_preco_unit_com_tributos: { type: ["number", "null"] },
+            consumo_scee_tarifa_unitaria: { type: ["number", "null"] },
+            media: { type: ["number", "null"] },
+            parc_injet_s_desc_percentual: { type: ["number", "null"] },
+            observacoes: { type: ["string", "null"] }
+          },
+          required: Object.keys({
+            unidade_consumidora: null,
+            total_a_pagar: null,
+            data_vencimento: null,
+            data_leitura_anterior: null,
+            data_leitura_atual: null,
+            data_proxima_leitura: null,
+            data_emissao: null,
+            apresentacao: null,
+            mes_ano_referencia: null,
+            leitura_anterior: null,
+            leitura_atual: null,
+            beneficio_tarifario_bruto: null,
+            beneficio_tarifario_liquido: null,
+            icms: null,
+            pis_pasep: null,
+            cofins: null,
+            fatura_debito_automatico: null,
+            credito_recebido: null,
+            saldo_kwh: null,
+            excedente_recebido: null,
+            ciclo_geracao: null,
+            informacoes_para_o_cliente: null,
+            uc_geradora: null,
+            uc_geradora_producao: null,
+            cadastro_rateio_geracao_uc: null,
+            cadastro_rateio_geracao_percentual: null,
+            injecoes_scee: null,
+            consumo_scee_quant: null,
+            consumo_scee_preco_unit_com_tributos: null,
+            consumo_scee_tarifa_unitaria: null,
+            media: null,
+            parc_injet_s_desc_percentual: null,
+            observacoes: null
+          })
+        }
       }
-    ]
+    }
   };
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify(payload)
   });
 
   const result = await response.json();
-  try {
-    const jsonText = result?.output?.[0]?.content?.[0]?.text;
-    const jsonParsed = JSON.parse(jsonText);
-    return { ...camposParciais, ...jsonParsed };
-  } catch {
-    return camposParciais;
+  if (result.output?.[0]?.content?.[0]?.text) {
+    return JSON.parse(result.output[0].content[0].text);
   }
+  return null;
 }
 
-// ==========================
-// 📤 Endpoint principal
-// ==========================
+// ===================
+// Rota principal
+// ===================
 app.post("/extract-hybrid", upload.single("file"), async (req, res) => {
-  const apiKey = req.body.api_key;
-  const file = req.file;
-
-  if (!apiKey) return res.status(400).json({ error: "Faltando api_key" });
-  if (!file) return res.status(400).json({ error: "Faltando arquivo PDF" });
-
   try {
-    const buffer = fs.readFileSync(file.path);
-    const camposLocais = await extrairCamposLocais(buffer);
+    const apiKey = req.body.api_key || process.env.OPENAI_API_KEY;
+    if (!apiKey) return res.status(400).json({ error: "API key ausente." });
+    if (!req.file) return res.status(400).json({ error: "Arquivo PDF ausente." });
 
-    const parsed = await pdfParse(buffer);
-    const texto = parsed.text;
-
-    const finalData = await completarComGPT4(camposLocais, texto, apiKey);
-
-    try { fs.unlinkSync(file.path); } catch {}
-
-    res.json(finalData);
+    const text = await extractTextFromPDF(req.file.buffer);
+    const structured = await callGPTAnalysis(text, apiKey);
+    res.json(structured || { error: "Falha ao processar a fatura." });
   } catch (err) {
-    console.error("❌ Erro:", err);
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ==========================
-// 🚀 Health Check
-// ==========================
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", version: "4.5-hybrid-lts" });
-});
-
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-});
-
+// ===================
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
