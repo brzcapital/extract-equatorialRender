@@ -9,7 +9,61 @@ dotenv.config();
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
-app.get("/health", (req, res) => res.json({ status: "ok" }));
+// Endpoint de Health atualizado
+app.get("/health", async (req, res) => {
+  try {
+    const fs = await import("fs");
+    const path = "./uploads/json/";
+    const usageFile = "./usage.json";
+
+    let usageData = {
+      month: new Date().toISOString().slice(0, 7),
+      total_tokens_month: 0,
+      last_extraction_tokens: 0,
+      extraction_health: "OK",
+      processed_count: 0,
+      recent: []
+    };
+
+    // Lê arquivo de uso se existir
+    if (fs.existsSync(usageFile)) {
+      const raw = fs.readFileSync(usageFile, "utf-8");
+      const parsed = JSON.parse(raw);
+      usageData = { ...usageData, ...parsed };
+    }
+
+    // Verifica se há arquivos recentes no diretório de JSONs
+    const recentExtractions = [];
+    if (fs.existsSync(path)) {
+      const dirs = fs.readdirSync(path);
+      dirs.forEach((dir) => {
+        const dirPath = `${path}${dir}`;
+        const files = fs.readdirSync(dirPath);
+        files.slice(-5).forEach((file) => {
+          recentExtractions.push({
+            file,
+            path: `${dirPath}/${file}`,
+            date: dir
+          });
+        });
+      });
+    }
+
+    usageData.recent = recentExtractions;
+
+    res.status(200).json({
+      status: "online",
+      timestamp: new Date().toISOString(),
+      version: "vC-2025.10.17",
+      server: "Render Node 22",
+      health: "✅ Operacional",
+      usage: usageData
+    });
+  } catch (err) {
+    console.error("Erro no health:", err);
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
 
 async function extractTextFromPDF(buffer) {
   const data = await pdfParse(buffer);
