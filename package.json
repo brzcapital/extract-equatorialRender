@@ -1,18 +1,18 @@
 {
   "name": "extract-equatorialRender",
   "version": "1.0.0",
-  "description": "Servidor híbrido Equatorial Goiás com GPT-4-Turbo",
+  "description": "Servidor híbrido Equatorial Goiás (parser + GPT) estável para Bubble/Render",
   "main": "index.mjs",
   "type": "module",
   "scripts": {
     "start": "node index.mjs"
   },
   "dependencies": {
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
-    "pdf-parse-fixed": "^1.0.3",
     "node-fetch": "^3.3.2",
-    "dotenv": "^16.4.5"
+    "pdf-parse-fixed": "^1.0.3"
   },
   "engines": {
     "node": "22.x"
