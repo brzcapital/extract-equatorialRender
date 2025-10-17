@@ -11,78 +11,69 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-// ===================
-// 1️⃣ Extrai texto da 1ª página do PDF
-// ===================
 async function extractTextFromPDF(buffer) {
   const data = await pdfParse(buffer);
-  const pages = data.text.split(/\f/g);
-  return (pages[0] || data.text).trim();
+  const text = (data.text || "").trim();
+  return text;
 }
 
-// ===================
-// 2️⃣ Função GPT inteligente com fallback
-// ===================
-async function callGPTAnalysis(pdfText, apiKey, attempt = 1) {
+async function callOpenAIChatStrictJSON(pdfText, apiKey) {
   const payload = {
-    model: "gpt-4-turbo",
-    reasoning: { effort: "medium" },
-    input: [
+    model: "gpt-4o-2024-08-06",
+    temperature: 0,
+    response_format: { type: "json_object" },
+    messages: [
       {
         role: "system",
         content:
-          "Você é um extrator confiável de dados de faturas Equatorial Goiás. Sempre retorne JSON válido. Todos os campos obrigatórios devem existir, mesmo que nulos. Nenhuma invenção de valores."
+          "Você é um extrator de dados de faturas Equatorial Goiás. Retorne SOMENTE um JSON válido (um objeto) com todos os campos solicitados, preenchendo com null ou 0 se não existir. Nunca adicione explicações."
       },
       {
         role: "user",
         content:
-          "Texto da fatura:\n" +
-          pdfText +
-          "\n\nRetorne APENAS o objeto JSON com os campos solicitados, sem texto adicional."
+          "Extraia do texto da fatura os seguintes campos: unidade_consumidora, total_a_pagar, data_vencimento, data_leitura_anterior, data_leitura_atual, data_proxima_leitura, data_emissao, apresentacao, mes_ano_referencia, leitura_anterior, leitura_atual, beneficio_tarifario_bruto, beneficio_tarifario_liquido, icms, pis_pasep, cofins, fatura_debito_automatico, credito_recebido, saldo_kwh, excedente_recebido, ciclo_geracao, informacoes_para_o_cliente, uc_geradora, uc_geradora_producao, cadastro_rateio_geracao_uc, cadastro_rateio_geracao_percentual, injecoes_scee (lista com: uc, quant_kwh, preco_unit_com_tributos, tarifa_unitaria), consumo_scee_quant, consumo_scee_preco_unit_com_tributos, consumo_scee_tarifa_unitaria, media, parc_injet_s_desc_percentual, observacoes.\n\nTexto da fatura:\n" +
+          pdfText
       }
-    ],
-    text: {
-      type: "output_text"
-    }
+    ]
   };
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
+      Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
 
-  const result = await response.json();
+  const json = await resp.json();
+  console.log("🧠 OpenAI RAW:", JSON.stringify(json, null, 2).slice(0, 2000));
 
-  console.log("🧠 GPT RESPONSE RAW:", JSON.stringify(result, null, 2).slice(0, 2500));
-
-  const rawText =
-    result.output_text ||
-    result.output?.[0]?.content?.[0]?.text ||
-    null;
-
-  if (!rawText && attempt === 1) {
-    console.log("⚠️ Nenhum texto retornado — reexecutando fallback reduzido...");
-    return await callGPTAnalysis(pdfText.slice(0, 5000), apiKey, 2);
+  let content = null;
+  if (json?.choices?.[0]?.message?.content) {
+    content = json.choices[0].message.content;
+  }
+  if (!content && json?.choices?.[0]?.message?.content?.[0]?.text) {
+    content = json.choices[0].message.content[0].text;
+  }
+  if (!content && json?.output_text) {
+    content = json.output_text;
   }
 
-  if (!rawText) return null;
+  if (!content || typeof content !== "string") {
+    console.warn("⚠️ Nenhum conteúdo textual retornado pelo GPT.");
+    return null;
+  }
 
   try {
-    const cleanText = rawText.trim().replace(/^[^{]*({[\s\S]*})[^}]*$/, "$1");
-    return JSON.parse(cleanText);
+    const cleaned = content.trim().replace(/^[^{]*({[\s\S]*})[^}]*$/, "$1");
+    return JSON.parse(cleaned);
   } catch (err) {
-    console.error("⚠️ Erro ao converter JSON:", err);
+    console.error("⚠️ Erro ao converter resposta em JSON:", err);
     return null;
   }
 }
 
-// ===================
-// 3️⃣ Rota principal
-// ===================
 app.post("/extract-hybrid", upload.single("file"), async (req, res) => {
   try {
     const apiKey = req.body.api_key || process.env.OPENAI_API_KEY;
@@ -90,15 +81,18 @@ app.post("/extract-hybrid", upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "Arquivo PDF ausente." });
 
     const text = await extractTextFromPDF(req.file.buffer);
-    const structured = await callGPTAnalysis(text, apiKey);
+    if (!text || text.length < 50) {
+      return res.status(422).json({ error: "Texto insuficiente extraído do PDF." });
+    }
 
-    if (!structured) {
+    const result = await callOpenAIChatStrictJSON(text, apiKey);
+    if (!result) {
       return res.status(500).json({
-        error: "Falha ao processar a fatura. GPT não retornou conteúdo válido."
+        error: "Falha ao processar a fatura. GPT não retornou conteúdo válido.",
       });
     }
 
-    res.json(structured);
+    res.json(result);
   } catch (err) {
     console.error("❌ Erro geral:", err);
     res.status(500).json({ error: err.message });
