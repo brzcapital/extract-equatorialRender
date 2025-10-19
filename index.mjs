@@ -248,7 +248,51 @@ async function extrairFatura(pdfBuffer) {
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
-app.get("/health", (_, res) => res.json({ ok: true }));
+// ------------------------------
+// 🩺 Endpoint de saúde detalhado
+// ------------------------------
+app.get("/health", async (_, res) => {
+  try {
+    const start = process.uptime();
+    const nodeVersion = process.version;
+    const memoryUsage = process.memoryUsage();
+    const now = dayjs().format("YYYY-MM-DD HH:mm:ss");
+    const env = process.env.NODE_ENV || "production";
+
+    // Verifica pdf-parse de forma segura
+    let pdfParseStatus = "ok";
+    try {
+      const { default: pdfParse } = await import("pdf-parse");
+      if (!pdfParse) pdfParseStatus = "erro: não carregado";
+    } catch {
+      pdfParseStatus = "erro: módulo não disponível";
+    }
+
+    res.json({
+      status: "online",
+      app_name: "extract-equatorialRender",
+      environment: env,
+      node_version: nodeVersion,
+      pdf_parse: pdfParseStatus,
+      uptime_seconds: Math.round(start),
+      memory_mb: {
+        rss: (memoryUsage.rss / 1024 / 1024).toFixed(1),
+        heapUsed: (memoryUsage.heapUsed / 1024 / 1024).toFixed(1),
+        heapTotal: (memoryUsage.heapTotal / 1024 / 1024).toFixed(1),
+      },
+      timestamp: now,
+      port: process.env.PORT || 3000,
+      message: "Servidor de extração Equatorial Goiás operacional ✅",
+    });
+  } catch (err) {
+    res.status(500).json({
+      status: "erro",
+      message: "Falha ao consultar status do servidor",
+      detalhe: err.message,
+    });
+  }
+});
+
 
 app.post("/extract", upload.single("file"), async (req, res) => {
   try {
