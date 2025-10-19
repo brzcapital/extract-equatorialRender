@@ -34,31 +34,42 @@
  * Atualizado: 20/10/2025
  */
 
+/**
+ * index.mjs – API de extração Equatorial Goiás
+ * Versão final: 20/10/2025
+ * Corrigido e testado com Node 20.19.x no Render
+ */
+/**
+ * index.mjs – API de extração Equatorial Goiás
+ * Versão final: 20/10/2025
+ * Corrigido e testado com Node 20.19.x no Render
+ */
+
 import express from "express";
 import multer from "multer";
 import dayjs from "dayjs";
+import fs from "fs";
+import path from "path";
+
+// ------------------------------
+// 🚀 Inicialização do servidor
+// ------------------------------
+const app = express();
+const upload = multer({ storage: multer.memoryStorage() });
 
 /**
  * Função principal de extração
  * Retorna todas as 60 chaves fixas com valores null se não encontrados
  */
 async function extrairFatura(pdfBuffer) {
-  // --- FIX DEFINITIVO PARA O ERRO ENOENT DO PDF-PARSE ---
-  import fs from "fs";
-  import path from "path";
-
+  // --- 🩹 FIX DEFINITIVO: Cria arquivo-fantasma para evitar erro ENOENT ---
   const testDir = path.join(process.cwd(), "node_modules/pdf-parse/test/data");
   const fakeFile = path.join(testDir, "05-versions-space.pdf");
-
   try {
-    if (!fs.existsSync(testDir)) {
-      fs.mkdirSync(testDir, { recursive: true });
-    }
-    if (!fs.existsSync(fakeFile)) {
-      fs.writeFileSync(fakeFile, "dummy");
-    }
+    if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
+    if (!fs.existsSync(fakeFile)) fs.writeFileSync(fakeFile, "dummy");
   } catch (e) {
-    console.error("Erro ao criar arquivo fake:", e.message);
+    console.warn("Aviso: falha ao criar arquivo-fantasma do pdf-parse:", e.message);
   }
 
   // --- Importa pdf-parse de forma segura ---
@@ -71,10 +82,9 @@ async function extrairFatura(pdfBuffer) {
     throw new Error("Falha ao carregar módulo pdf-parse");
   }
 
-  // Agora sim o parser é chamado com segurança
+  // --- Processa o PDF ---
   const parsed = await pdfParse(pdfBuffer);
   const text = parsed.text.replace(/\s+/g, " ").trim();
-
 
   // Helpers
   const num = (s) => (s ? parseFloat(s.replace(/\./g, "").replace(",", ".")) : null);
@@ -100,6 +110,7 @@ async function extrairFatura(pdfBuffer) {
     leitura_atual = parseInt(mLeit[2]);
   }
 
+  // Injeções SCEE
   const injecoes_scee = [];
   for (const m of text.matchAll(
     /INJEÇÃO\s+SCEE\s*-\s*UC\s+(\d+).*?kWh\s+([\d.,]+)\s+([\d.,]+)[^-\d,]+(-?\d+,\d+)/g
@@ -116,19 +127,21 @@ async function extrairFatura(pdfBuffer) {
     });
   }
 
+  // Consumo SCEE
   const mConsTar = text.match(/CONSUMO\s+SCEE\s+kWh\s+([\d.,]+)/i);
   const consumo_scee_tarifa_unitaria = mConsTar ? num(mConsTar[1]) : null;
-
   const mConsQtdLine = text.match(/CONSUMO\s+SCEE\s+kWh\s+[\d.,]+\s+([\d.,]+)/i);
   const consumo_scee_quant = mConsQtdLine ? num(mConsQtdLine[1]) : null;
   const consumo_scee_preco_unit_com_tributos = mConsTar ? num(mConsTar[1]) : null;
 
+  // Média
   const historicos = Array.from(text.matchAll(/\b(\d{3,4}),00\b/g)).map((m) => num(m[1] + ",00"));
   const media =
     historicos.length > 0
       ? +(historicos.reduce((a, b) => a + b, 0) / historicos.length).toFixed(2)
       : null;
 
+  // Campos simples
   const mUC = text.match(/\b(\d{8,11})\b(?=.*EQUATORIAL)/);
   const unidade_consumidora = mUC ? mUC[1] : null;
 
@@ -144,6 +157,7 @@ async function extrairFatura(pdfBuffer) {
   const mRef = text.match(/\b([A-Z]{3}\/\d{4})\b/);
   const mes_ano_referencia = mRef ? mRef[1] : null;
 
+  // Blocos informativos
   const infoCliente = (() => {
     const m = text.match(
       /O FATURAMENTO DAS INSTALAÇÕES.*?A EQUATORIAL ENERGIA AGRADECE PELA PONTUALIDADE.*?(?= ENERGIA ATIVA| NOTA FISCAL|$)/i
@@ -151,6 +165,7 @@ async function extrairFatura(pdfBuffer) {
     return m ? m[0].trim() : null;
   })();
 
+  // SCEE
   const mUcGer = text.match(/UC\s+(\d{8,12})\s*:\s*([\d.]+,\d{2})/i);
   const uc_geradora = mUcGer ? mUcGer[1] : null;
   const uc_geradora_producao = mUcGer ? num(mUcGer[2]) : null;
@@ -227,9 +242,6 @@ async function extrairFatura(pdfBuffer) {
     observacoes: null,
   };
 
-  // ------------------------------
-  // 🔹 3. Resultado consolidado
-  // ------------------------------
   const resultadoExtraido = {
     unidade_consumidora,
     total_a_pagar,
@@ -266,28 +278,19 @@ async function extrairFatura(pdfBuffer) {
     observacoes,
   };
 
-  // Combina e retorna todas as 60 chaves, preenchendo null onde não houver dado
   return Object.assign({}, modeloBase, resultadoExtraido);
 }
-
-// ------------------------------
-// 🚀 Servidor HTTP (Render)
-// ------------------------------
-const app = express();
-const upload = multer({ storage: multer.memoryStorage() });
 
 // ------------------------------
 // 🩺 Endpoint de saúde detalhado
 // ------------------------------
 app.get("/health", async (_, res) => {
   try {
-    const start = process.uptime();
     const nodeVersion = process.version;
     const memoryUsage = process.memoryUsage();
     const now = dayjs().format("YYYY-MM-DD HH:mm:ss");
     const env = process.env.NODE_ENV || "production";
 
-    // Verifica pdf-parse de forma segura
     let pdfParseStatus = "ok";
     try {
       const { default: pdfParse } = await import("pdf-parse");
@@ -302,7 +305,7 @@ app.get("/health", async (_, res) => {
       environment: env,
       node_version: nodeVersion,
       pdf_parse: pdfParseStatus,
-      uptime_seconds: Math.round(start),
+      uptime_seconds: Math.round(process.uptime()),
       memory_mb: {
         rss: (memoryUsage.rss / 1024 / 1024).toFixed(1),
         heapUsed: (memoryUsage.heapUsed / 1024 / 1024).toFixed(1),
@@ -321,7 +324,9 @@ app.get("/health", async (_, res) => {
   }
 });
 
-
+// ------------------------------
+// 📤 Endpoint principal /extract
+// ------------------------------
 app.post("/extract", upload.single("file"), async (req, res) => {
   try {
     if (!req.file)
@@ -334,14 +339,16 @@ app.post("/extract", upload.single("file"), async (req, res) => {
   }
 });
 
+// ------------------------------
+// 🚀 Inicializa servidor
+// ------------------------------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Servidor de extração online na porta ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Servidor online na porta ${PORT}`));
 
-// Execução local opcional: node index.mjs caminho.pdf
+// Execução local opcional
 if (process.argv[2]) {
-  import("fs").then(async ({ readFileSync }) => {
-    const buf = readFileSync(process.argv[2]);
-    const out = await extrairFatura(buf);
+  const buf = fs.readFileSync(process.argv[2]);
+  extrairFatura(buf).then((out) => {
     console.log(JSON.stringify(out, null, 2));
     process.exit(0);
   });
