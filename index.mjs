@@ -66,6 +66,12 @@
  * Versão 4 – 2025-10-20  18:18
  * Refinada: total_a_pagar fixo (2 casas) + débito automático inteligente
  */
+/**
+ * index.mjs – API de Extração Equatorial Goiás
+ * Versão 5 – 2025-10-20  18:31
+ * Compatível com: Render, Postman e Bubble
+ * Refinado: regex flexíveis + correção de blocos + parsing numérico
+ */
 
 import express from "express";
 import multer from "multer";
@@ -84,16 +90,27 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const PORT = process.env.PORT || 10000;
 
-/* ----------------------- Funções Auxiliares ----------------------- */
+/* ----------------------- Funções auxiliares ----------------------- */
+
+// Conversão numérica robusta
 function num(v) {
-  if (!v) return null;
-  return parseFloat(
-    v.toString().replace(/[^\d,-]/g, "").replace(".", "").replace(",", ".")
-  );
+  if (v == null) return null;
+  const s = v
+    .toString()
+    .replace(/[^\d,-]/g, "")
+    .replace(/\.(?=\d{3}\b)/g, "")
+    .replace(/\./g, "")
+    .replace(",", ".");
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
 }
+
+// Segurança numérica
 function safe(v) {
   return isNaN(v) ? null : v;
 }
+
+// Normalização de texto
 function normalizeText(text) {
   return text
     .replace(/[•\t]+/g, " ")
@@ -102,13 +119,15 @@ function normalizeText(text) {
     .trim();
 }
 
-/* ----------------------- Função principal ----------------------- */
+/* ----------------------- Extração principal ----------------------- */
+
 async function extrairFatura(pdfBuffer) {
   if (!pdfParse) throw new Error("Falha ao carregar módulo pdf-parse");
+
   const parsed = await pdfParse(pdfBuffer);
   const text = normalizeText(parsed.text);
 
-  /* ----------------------- Identificação básica ----------------------- */
+  /* ---------- Identificação básica ---------- */
   const unidade_consumidora =
     (text.match(/(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\/\d{4}\s+(\d{6,12})/i) || [])[2] ||
     (text.match(/(10\d{8,10})/) || [])[1] ||
@@ -116,33 +135,57 @@ async function extrairFatura(pdfBuffer) {
 
   const mes_ano_referencia = (text.match(/(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\/\d{4}/i) || [])[0] || null;
 
-  /* ----------------------- Valores principais ----------------------- */
+  /* ---------- Valores principais ---------- */
   const totalMatch = text.match(/R\$\*+\s*([\d.]+,\d{2})/);
   const total_a_pagar = totalMatch ? parseFloat(num(totalMatch[1]).toFixed(2)) : null;
 
-  const mVenc = text.match(/VENCIMENTO\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) ||
-                text.match(/R\$\*+[\d.,]+\s*(\d{2}\/\d{2}\/\d{4})/);
+  const mVenc =
+    text.match(/VENCIMENTO\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) ||
+    text.match(/R\$\*+[\d.,]+\s*(\d{2}\/\d{2}\/\d{4})/);
   const data_vencimento = mVenc ? mVenc[1] : null;
 
   const data_emissao = (text.match(/EMISS[ÃA]O\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
-  const apresentacao = (text.match(/APRESENTA[ÇC][AÃ]O\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
+  const apresentacao =
+    (text.match(/APRESENTA[ÇC][AÃ]O\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] ||
+    (text.match(/\b\d{2}\/\d{2}\/\d{4}\b(?=.*APRESENT)/i) || [])[1] ||
+    null;
 
-  /* ----------------------- Leituras ----------------------- */
+  /* ---------- Datas de leitura ---------- */
   const data_leitura_anterior = (text.match(/LEITURA\s+ANTERIOR.*?(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
   const data_leitura_atual = (text.match(/LEITURA\s+ATUAL.*?(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
   const data_proxima_leitura = (text.match(/PR[ÓO]XIMA\s+LEITURA.*?(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
 
-  /* ----------------------- Consumo SCEE ----------------------- */
+  // fallback (detecta trio de datas próximas ao cabeçalho)
+  function firstTrioDatesNearHeader(t) {
+    const head = t.search(/R\$\*+[\d.,]+\s*\d{2}\/\d{2}\/\d{4}/);
+    const window = head > -1 ? t.slice(Math.max(0, head - 200), head + 300) : t;
+    const ds = Array.from(window.matchAll(/\b\d{2}\/\d{2}\/\d{4}\b/g)).map(m => m[0]);
+    const venc = (t.match(/VENCIMENTO\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] ||
+                 (t.match(/R\$\*+[\d.,]+\s*(\d{2}\/\d{2}\/\d{4})/) || [])[1];
+    const apenasLeituras = ds.filter(d => d !== venc);
+    const [ant, atual, prox] = apenasLeituras.slice(0,3);
+    return { ant: ant || null, atual: atual || null, prox: prox || null };
+  }
+
+  let la = data_leitura_anterior, lt = data_leitura_atual, lp = data_proxima_leitura;
+  if (!la || !lt) {
+    const trio = firstTrioDatesNearHeader(text);
+    la = la || trio.ant;
+    lt = lt || trio.atual;
+    lp = lp || trio.prox;
+  }
+
+  /* ---------- Consumo SCEE ---------- */
   const mCons = text.match(
-    /CONSUMO\s+SCEE[\s\S]{0,40}?kWh\s*([\d.,]+)\s+([\d.]+,\d{2})\s+(?:[\d.]+,\d{2})?\s*([\d.]+,\d{2})/i
+    /CONSUMO\s+SCEE[\s\S]{0,60}?kWh\s*([01],\d{6})\s+([\d.]+,\d{2})[\s\S]{0,20}(?:[\d.]+,\d{2})?[\s\S]{0,10}\s+([\d.]+,\d{2})/i
   );
   const consumo_scee_preco_unit_com_tributos = mCons ? num(mCons[1]) : null;
   const consumo_scee_quant = mCons ? num(mCons[2]) : null;
   const consumo_scee_tarifa_unitaria = mCons ? num(mCons[3]) : null;
 
-  /* ----------------------- Injeções SCEE (múltiplas) ----------------------- */
+  /* ---------- Injeções SCEE (múltiplas) ---------- */
   const injecoes_scee = [];
-  const reInj = /INJE[ÇC][AÃ]O\s*SCEE[\s\S]{0,40}?UC\s*(\d+)[\s\S]{0,60}?kWh\s*([\d.]+,\d{2})[\s\S]{0,40}?([01],\d{6})[\s\S]{0,60}?(?:-?[\d.]+,\d{2})[\s\S]{0,20}?(-?[\d.]+,\d{2})/gi;
+  const reInj = /INJE[ÇC][AÃ]O\s*SCEE[\s\S]{0,40}?UC\s*(\d+)[\s\S]{0,80}?kWh\s*([\d.]+,\d{2})[\s\S]{0,60}?([01],\d{6})[\s\S]{0,60}?(?:-?[\d.]+,\d{2})[\s\S]{0,20}?(-?[\d.]+,\d{2})/gi;
   for (const m of text.matchAll(reInj)) {
     injecoes_scee.push({
       uc: m[1],
@@ -152,8 +195,11 @@ async function extrairFatura(pdfBuffer) {
     });
   }
 
-  /* ----------------------- Bloco Informações do SCEE ----------------------- */
-  const bSCEE = (text.match(/INFORMA[ÇC][AÃ]OES?\s+DO\s+SCEE[:\-]?\s*([\s\S]+?)(?=INFORMA|ENERGIA|A\s+EQUATORIAL|$)/i) || [])[1] || "";
+  /* ---------- Bloco "INFORMAÇÕES DO SCEE" ---------- */
+  const bSCEE = (text.match(
+    /INFORMA[ÇC][AÃ]OES?\s+DO\s+SCEE[:\-]?\s*([\s\S]+?)(?=INFORMA[ÇC][AÃ]OES?\s+PARA\s+O\s+CLIENTE|ENERGIA\s+ATIVA|NOTA\s+FISCAL|A\s+EQUATORIAL|$)/i
+  ) || [])[1] || "";
+
   const geracao_ciclo = (bSCEE.match(/\((\d{1,2}\/\d{4})\)/) || [])[1] || null;
   const uc_geradora = (bSCEE.match(/UC\s+(\d{8,12})/i) || [])[1] || null;
   const uc_geradora_producao = num((bSCEE.match(/UC\s+\d+\s*[:\-]?\s*([\d.]+,\d{2})/) || [])[1]);
@@ -163,14 +209,14 @@ async function extrairFatura(pdfBuffer) {
   const cadastro_rateio_geracao_uc = (bSCEE.match(/CADASTRO\s+RATEIO.*?UC\s+(\d+)/i) || [])[1] || null;
   const cadastro_rateio_geracao_percentual = (bSCEE.match(/=\s*([\d.,]+%)/) || [])[1] || null;
 
-  /* ----------------------- Benefícios e tributos ----------------------- */
+  /* ---------- Tributos e benefícios ---------- */
   const beneficio_tarifario_bruto = num((text.match(/BENEF[ÍI]CIO\s+TARIF[ÁA]RIO\s+BRUTO.*?([\d.,]+)/i) || [])[1]);
   const beneficio_tarifario_liquido = num((text.match(/BENEF[ÍI]CIO\s+TARIF[ÁA]RIO\s+L[ÍI]QUIDO.*?(-?[\d.,]+)/i) || [])[1]);
   const icms = /ICMS/i.test(text) ? 0 : null;
   const pis_pasep = /PIS/i.test(text) ? 0 : null;
   const cofins = /COFINS/i.test(text) ? 0 : null;
 
-  /* ----------------------- Débito Automático (nova regra) ----------------------- */
+  /* ---------- Débito automático inteligente ---------- */
   let fatura_debito_automatico = "no";
   if (/FATURA\s+COM\s+LAN[ÇC]AMENTO\s+PARA\s+D[ÉE]BITO\s+AUTOM[ÁA]TICO/i.test(text)) {
     fatura_debito_automatico = "yes";
@@ -180,23 +226,31 @@ async function extrairFatura(pdfBuffer) {
     fatura_debito_automatico = "no";
   }
 
-  /* ----------------------- Textos ----------------------- */
-  const informacoes_para_o_cliente = (text.match(/INFORMA[ÇC][AÃ]OES?\s+PARA\s+O\s+CLIENTE[:\-]?\s*([\s\S]+?)(?=ENERGIA\s+ATIVA|NOTA\s+FISCAL|A\s+EQUATORIAL|$)/i) || [])[1] || null;
-  const mObs = text.match(/Processo\s+\d+\s*-\s*[\d.-]+\s*-\s*Valor\s+controverso\s+R\$\s*[\d.,]+\./i);
-  const observacoes = mObs ? mObs[0] : null;
+  /* ---------- Informações e observações ---------- */
+  const informacoes_para_o_cliente = (text.match(
+    /INFORMA[ÇC][AÃ]OES?\s+PARA\s+O\s+CLIENTE[:\-]?\s*([\s\S]+?)(?=CADASTRO\s+RATEIO|NOTA\s+FISCAL|ENERGIA\s+ATIVA|A\s+EQUATORIAL|$)/i
+  ) || [])[1] || null;
 
-  /* ----------------------- Média ----------------------- */
-  const historicos = Array.from(text.matchAll(/\b(\d{3,4}),00\b/g)).map((m) => num(m[1] + ",00"));
+  const mObs = text.match(/Processo\s+\d+\s*-\s*[\d.-]+\s*-\s*Valor\s+controverso\s+R\$\s*[\d.,]+\./i);
+  let observacoes = mObs ? mObs[0] : null;
+  if (observacoes)
+    observacoes = observacoes.replace(/R\$\s*([\d.]+),?(\d{2})?/g, (m, a, b) => {
+      const v = a.replace(/\./g, "") + (b ? "," + b : "");
+      return "R$ " + v;
+    });
+
+  /* ---------- Média de consumo ---------- */
+  const historicos = Array.from(text.matchAll(/\b(\d{3,4}),00\b/g)).map(m => num(m[1] + ",00"));
   const media = historicos.length ? Math.round(historicos.reduce((a, b) => a + b, 0) / historicos.length) : null;
 
-  /* ----------------------- Retorno final ----------------------- */
+  /* ---------- Retorno final ---------- */
   return {
     unidade_consumidora,
     total_a_pagar,
     data_vencimento,
-    data_leitura_anterior,
-    data_leitura_atual,
-    data_proxima_leitura,
+    data_leitura_anterior: la,
+    data_leitura_atual: lt,
+    data_proxima_leitura: lp,
     data_emissao,
     apresentacao,
     mes_ano_referencia,
@@ -258,5 +312,4 @@ app.post("/extract", upload.single("file"), async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`✅ Servidor online na porta ${PORT}`));
-
 
