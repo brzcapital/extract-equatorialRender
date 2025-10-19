@@ -45,6 +45,11 @@
  * Versão final estável – 20/10/2025
  * Compatível com Render (Node 20.x)
  */
+/**
+ * index.mjs – API de extração Equatorial Goiás
+ * Versão consolidada 2025-10-20
+ * Compatível com Node 20.x (Render)
+ */
 
 import express from "express";
 import multer from "multer";
@@ -53,195 +58,162 @@ import fs from "fs";
 import path from "path";
 import { createRequire } from "module";
 
+const require = createRequire(import.meta.url);
+let pdfParse;
+try {
+  pdfParse = require("pdf-parse");
+} catch (err) {
+  console.error("❌ Falha ao carregar pdf-parse:", err.message);
+}
+
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
+const PORT = process.env.PORT || 10000;
 
-/**
- * Função principal de extração
- * Retorna todas as 60 chaves fixas com valores null se não encontrados
- */
+/* ------------------------- Funções utilitárias -------------------------- */
+function num(v) {
+  if (!v) return null;
+  return parseFloat(v.replace(/[^\d,-]/g, "").replace(".", "").replace(",", "."));
+}
+function safe(v) {
+  return isNaN(v) ? null : v;
+}
+function clean(text) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/* ----------------------------- Extração PDF ----------------------------- */
 async function extrairFatura(pdfBuffer) {
-  // --- 🩹 FIX DEFINITIVO: Cria arquivo-fantasma do pdf-parse (evita ENOENT) ---
-  const testDir = path.join(process.cwd(), "node_modules/pdf-parse/test/data");
-  const fakeFile = path.join(testDir, "05-versions-space.pdf");
-  try {
-    if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
-    if (!fs.existsSync(fakeFile)) fs.writeFileSync(fakeFile, "dummy");
-  } catch (e) {
-    console.warn("Aviso: falha ao criar arquivo-fantasma:", e.message);
-  }
-
-  // --- Importação compatível com CommonJS e Render ---
-  let pdfParse;
-  try {
-    const require = createRequire(import.meta.url);
-    pdfParse = require("pdf-parse");
-  } catch (err) {
-    console.error("❌ Falha ao carregar pdf-parse via require:", err);
-    throw new Error("Falha ao carregar módulo pdf-parse");
-  }
-
-  // --- Processa o PDF ---
+  if (!pdfParse) throw new Error("Falha ao carregar módulo pdf-parse");
   const parsed = await pdfParse(pdfBuffer);
-  const text = parsed.text.replace(/\s+/g, " ").trim();
+  const text = clean(parsed.text);
 
-  // Helpers
-  const num = (s) => (s ? parseFloat(s.replace(/\./g, "").replace(",", ".")) : null);
-  const safe = (v) => (v !== undefined ? v : null);
+  /* ============ BLOCO CABEÇALHO (VALOR TOTAL + DATAS) ============ */
+  const mCabec = text.match(/(\d{1,3}(?:\.\d{3})*,\d{2})\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})/);
+  const total_a_pagar = mCabec ? num(mCabec[1]) : null;
+  const data_vencimento = mCabec ? mCabec[2] : null;
+  const data_leitura_anterior = mCabec ? mCabec[3] : null;
+  const data_leitura_atual = mCabec ? mCabec[4] : null;
 
-  // ------------------------------
-  // 🔹 1. Extração de dados chaves
-  // ------------------------------
-  const datasLeit = Array.from(text.matchAll(/\b\d{2}\/\d{2}\/\d{4}\b/g)).map((m) => m[0]);
-  const data_leitura_anterior = datasLeit[0] || null;
-  const data_leitura_atual = datasLeit[1] || null;
-  const data_proxima_leitura = datasLeit[2] || null;
+  // próxima leitura = data extra “solta” que não aparece nas anteriores
+  let data_proxima_leitura = null;
+  const datasAll = Array.from(text.matchAll(/\b\d{2}\/\d{2}\/\d{4}\b/g)).map(m => m[0]);
+  const cand = datasAll.find(
+    d => ![data_leitura_anterior, data_leitura_atual, data_vencimento].includes(d)
+  );
+  if (cand) data_proxima_leitura = cand;
 
-  let apresentacao = null;
-  const mApres = text.match(/ANEEL[^\d]*(\d{2}\/\d{2}\/\d{4})\s+\d{4}\/\d{2}/i);
-  if (mApres) apresentacao = mApres[1];
+  /* ============ UC PRINCIPAL ============ */
+  const mUCMain = text.match(/(?:JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\/\d{4}\s+(\d{6,12})/i);
+  const unidade_consumidora = mUCMain ? mUCMain[1] : null;
 
-  let leitura_anterior = null;
-  let leitura_atual = null;
-  const mLeit = text.match(/ENERGIA\s+ATIVA\s*-\s*KWH\s+(\d+)\s+\d+\s+(\d+)/i);
-  if (mLeit) {
-    leitura_anterior = parseInt(mLeit[1]);
-    leitura_atual = parseInt(mLeit[2]);
+  /* ============ EMISSÃO / APRESENTAÇÃO ============ */
+  const mEmissao = text.match(/EMISS[ÃA]O\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i);
+  const data_emissao = mEmissao ? mEmissao[1] : null;
+  const mApres = text.match(/DATA\s+DE\s+APRESENTA[ÇC][AÃ]O\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i);
+  const apresentacao = mApres ? mApres[1] : null;
+
+  /* ============ REFERÊNCIA (MÊS/ANO) ============ */
+  const mRef = text.match(/(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\/\d{4}/i);
+  const mes_ano_referencia = mRef ? mRef[0].toUpperCase() : null;
+
+  /* ============ LEITURAS DO MEDIDOR ============ */
+  let leitura_anterior = null, leitura_atual = null;
+  const mLeitLinha = text.match(/ENERGIA\s+ATIVA\s*-\s*KWH\s+(\d+)\s+(\d+)[^\d]+(\d+)/i);
+  if (mLeitLinha) {
+    const atual = parseInt(mLeitLinha[1]);
+    const consumo = parseInt(mLeitLinha[2]);
+    const possAnt = parseInt(mLeitLinha[3]);
+    if (String(possAnt).length > 6 || Math.abs(atual - possAnt) !== consumo) {
+      const bloco = text.slice(mLeitLinha.index, mLeitLinha.index + 160);
+      const candidatos = Array.from(bloco.matchAll(/\b\d{4,6}\b/g)).map(m => parseInt(m[0]));
+      const antValido = candidatos.find(n => Math.abs(atual - n) === consumo);
+      if (antValido) leitura_anterior = antValido;
+      leitura_atual = atual;
+    } else {
+      leitura_anterior = possAnt;
+      leitura_atual = atual;
+    }
   }
 
-  // Injeções SCEE
+  /* ============ CONSUMO SCEE ============ */
+  let consumo_scee_preco_unit_com_tributos = null,
+      consumo_scee_quant = null,
+      consumo_scee_tarifa_unitaria = null;
+  const mCons = text.match(/CONSUMO\s+SCEE\s+kWh\s+([0-9],\d{6})\s+([\d.]+,\d{2})\s+[0-9]{1,2},\d{2}\s+([\d.]+,\d{2})/i)
+             || text.match(/CONSUMO\s+SCEE\s+kWh\s+([0-9],\d{6})\s+([\d.]+,\d{2})\s+([\d.]+,\d{2})/i);
+  if (mCons) {
+    consumo_scee_preco_unit_com_tributos = num(mCons[1]);
+    consumo_scee_quant = num(mCons[2]);
+    consumo_scee_tarifa_unitaria = num(mCons[4] || mCons[3]);
+  }
+
+  /* ============ INJEÇÕES SCEE ============ */
   const injecoes_scee = [];
   for (const m of text.matchAll(
-    /INJEÇÃO\s+SCEE\s*-\s*UC\s+(\d+).*?kWh\s+([\d.,]+)\s+([\d.,]+)[^-\d,]+(-?\d+,\d+)/g
+    /INJE[ÇC][AÃ]O\s+SCEE[^U]*(?:UC\s+(\d+)).*?kWh\s+([0-9]{1,4},\d{1,2})\s+([0-9],\d{6}).*?(-?\d+,\d{2}).*?(-?\d+,\d{2})/gi
   )) {
-    const uc = m[1].trim();
-    const preco = num(m[2]);
-    const quant = num(m[3]);
-    const totalImpresso = Math.abs(num(m[4]));
+    const uc = m[1];
+    const quant = num(m[2]);
+    const preco = num(m[3]);
+    const tarifa = Math.abs(num(m[5]));
     injecoes_scee.push({
       uc,
-      preco_unit_com_tributos: safe(preco),
       quant_kwh: safe(quant),
-      tarifa_unitaria: safe(totalImpresso),
+      preco_unit_com_tributos: safe(preco),
+      tarifa_unitaria: safe(tarifa),
     });
   }
 
-  // Consumo SCEE
-  const mConsTar = text.match(/CONSUMO\s+SCEE\s+kWh\s+([\d.,]+)/i);
-  const consumo_scee_tarifa_unitaria = mConsTar ? num(mConsTar[1]) : null;
-  const mConsQtdLine = text.match(/CONSUMO\s+SCEE\s+kWh\s+[\d.,]+\s+([\d.,]+)/i);
-  const consumo_scee_quant = mConsQtdLine ? num(mConsQtdLine[1]) : null;
-  const consumo_scee_preco_unit_com_tributos = mConsTar ? num(mConsTar[1]) : null;
+  /* ============ BLOCO INFORMAÇÕES SCEE ============ */
+  const blocoSCEE = text.match(/INFORMAÇÕES\s+DO\s+SCEE:[\s\S]+?CADASTRO\s+RATEIO[\s\S]+?(?=\n|$)/i);
+  let geracao_ciclo = null,
+      uc_geradora = null,
+      uc_geradora_producao = null,
+      excedente_recebido = null,
+      credito_recebido = null,
+      saldo_kwh_total = null,
+      cadastro_rateio_geracao_uc = null,
+      cadastro_rateio_geracao_percentual = null;
+  if (blocoSCEE) {
+    const bloco = blocoSCEE[0];
+    geracao_ciclo = (bloco.match(/GERA[ÇC][AÃ]O\s+CICLO\s*\(([^)]+)\)/i) || [])[1] || null;
+    uc_geradora = (bloco.match(/UC\s+(\d{8,12})/i) || [])[1] || null;
+    uc_geradora_producao = num((bloco.match(/UC\s+\d+\s*:\s*([\d.]+,\d{2})/) || [])[1]);
+    excedente_recebido = num((bloco.match(/EXCEDENTE\s+RECEBIDO.*?([\d.]+,\d{2})/) || [])[1]);
+    credito_recebido = num((bloco.match(/CR[ÉE]DITO\s+RECEBIDO.*?([\d.]+,\d{2})/) || [])[1]);
+    saldo_kwh_total = num((bloco.match(/SALDO\s+KWH[:\s]+([\d.]+,\d{2})/) || [])[1]);
+    cadastro_rateio_geracao_uc = (bloco.match(/CADASTRO\s+RATEIO\s+GERA[ÇC][AÃ]O.*?UC\s+(\d+)/i) || [])[1] || null;
+    cadastro_rateio_geracao_percentual = (bloco.match(/=\s*([\d,.]+%)/) || [])[1] || null;
+  }
 
-  // Média
-  const historicos = Array.from(text.matchAll(/\b(\d{3,4}),00\b/g)).map((m) => num(m[1] + ",00"));
-  const media =
-    historicos.length > 0
-      ? +(historicos.reduce((a, b) => a + b, 0) / historicos.length).toFixed(2)
-      : null;
+  /* ============ TARIFA UNITÁRIA SEM TRIBUTOS ============ */
+  const mTarifaSemTrib = text.match(/(\d,\d{6})(?=\s*[-\d, ]*SCEE)/i);
+  const valor_tarifa_unitaria_sem_tributos = mTarifaSemTrib ? num(mTarifaSemTrib[1]) : null;
 
-  // Campos simples
-  const mUC = text.match(/\b(\d{8,11})\b(?=.*EQUATORIAL)/);
-  const unidade_consumidora = mUC ? mUC[1] : null;
+  /* ============ BENEFÍCIOS / TRIBUTOS ============ */
+  const beneficio_tarifario_bruto = num((text.match(/BENEF[ÍI]CIO\s+TARIF[ÁA]RIO\s+BRUTO.*?([\d.]+,\d{2})/i) || [])[1]);
+  const beneficio_tarifario_liquido = num((text.match(/BENEF[ÍI]CIO\s+TARIF[ÁA]RIO\s+L[ÍI]QUIDO.*?(-?[\d.]+,\d{2})/i) || [])[1]);
+  const icms = /ICMS\s+\d+%.*?\s0(\D|$)/i.test(text) ? 0 : null;
+  const pis_pasep = /PIS\/PASEP.*?\s0(\D|$)/i.test(text) ? 0 : null;
+  const cofins = /COFINS.*?\s0(\D|$)/i.test(text) ? 0 : null;
 
-  const mVenc = text.match(/\b(\d{2}\/\d{2}\/\d{4})\b(?=.*R\$)/);
-  const data_vencimento = mVenc ? mVenc[1] : null;
+  /* ============ DÉBITO AUTOMÁTICO ============ */
+  let fatura_debito_automatico = "no";
+  if (/D[ÉE]BITO\s+AUTOM[ÁA]TICO/i.test(text)) {
+    fatura_debito_automatico = /ATIVADO|AUTOM[ÁA]TICO\s+-\s*BANCO/i.test(text) ? "yes" : "no";
+  }
 
-  const mTotal = text.match(/R\$[*]*\s*([\d.,]+)/);
-  const total_a_pagar = mTotal ? num(mTotal[1]) : null;
+  /* ============ INFORMAÇÕES CLIENTE / OBSERVAÇÕES ============ */
+  const infoCliente = (text.match(/INFORMA[ÇC][AÃ]OES\s+PARA\s+O\s+CLIENTE[:\-]?\s*(.*?)(?=CADASTRO|NOTA|$)/i) || [])[1] || null;
+  const observacoes = (text.match(/NOTA\s+FISCAL.*?(Processo.*?R\$.*?\.)/i) || [])[1] || null;
 
-  const mEmissao = text.match(/DATA\s+DE\s+EMISSÃO:\s*(\d{2}\/\d{2}\/\d{4})/i);
-  const data_emissao = mEmissao ? mEmissao[1] : null;
+  /* ============ MÉDIA DE CONSUMO ============ */
+  const historicos = Array.from(text.matchAll(/\b(\d{3,4}),00\b/g)).map(m => num(m[1] + ",00"));
+  const media = historicos.length ? safe(historicos.reduce((a, b) => a + b, 0) / historicos.length) : null;
 
-  const mRef = text.match(/\b([A-Z]{3}\/\d{4})\b/);
-  const mes_ano_referencia = mRef ? mRef[1] : null;
-
-  // Bloco "Informações para o cliente"
-  const infoCliente = (() => {
-    const m = text.match(
-      /O FATURAMENTO DAS INSTALAÇÕES.*?A EQUATORIAL ENERGIA AGRADECE PELA PONTUALIDADE.*?(?= ENERGIA ATIVA| NOTA FISCAL|$)/i
-    );
-    return m ? m[0].trim() : null;
-  })();
-
-  // Campos adicionais
-  const mUcGer = text.match(/UC\s+(\d{8,12})\s*:\s*([\d.]+,\d{2})/i);
-  const uc_geradora = mUcGer ? mUcGer[1] : null;
-  const uc_geradora_producao = mUcGer ? num(mUcGer[2]) : null;
-
-  const mExced = text.match(/EXCEDENTE\s+RECEBIDO\s+KWH:\s*UC\s+\d{8,12}\s*:\s*([\d.]+,\d{2})/i);
-  const excedente_recebido = mExced ? num(mExced[1]) : null;
-
-  const mCred = text.match(/CRÉDITO\s+RECEBIDO\s+KWH\s+([\d.]+,\d{2})/i);
-  const credito_recebido = mCred ? num(mCred[1]) : null;
-
-  const mSaldo = text.match(/SALDO\s+KWH:\s*([\d.]+,\d{2})/i);
-  const saldo_kwh = mSaldo ? num(mSaldo[1]) : null;
-
-  const mCiclo = text.match(/GERAÇÃO\s+CICLO\s*\((\d{1,2}\/\d{4})\)/i);
-  const ciclo_geracao = mCiclo ? mCiclo[1] : null;
-
-  const mRateio = text.match(/CADASTRO\s+RATEIO\s+GERAÇÃO:\s*UC\s+(\d+)\s*=\s*([0-9]+%)/i);
-  const cadastro_rateio_geracao_uc = mRateio ? mRateio[1] : null;
-  const cadastro_rateio_geracao_percentual = mRateio ? mRateio[2] : null;
-
-  const icms = /ICMS\s+\d+%0\s+0/i.test(text) ? 0 : null;
-  const pis_pasep = /PIS\/PASEP\s+[\d.,]+%0\s+0/i.test(text) ? 0 : null;
-  const cofins = /COFINS\s+[\d.,]+%0\s+0/i.test(text) ? 0 : null;
-
-  const mBenB = text.match(/BENEFÍCIO\s+TARIFÁRIO\s+BRUTO\s+SCEE\s+([\d.]+,\d{2})/i);
-  const beneficio_tarifario_bruto = mBenB ? num(mBenB[1]) : null;
-  const mBenL = text.match(/BENEFÍCIO\s+TARIFÁRIO\s+LÍQUIDO\s+SCEE\s+(-?[\d.]+,\d{2})/i);
-  const beneficio_tarifario_liquido = mBenL ? num(mBenL[1]) : null;
-
-  const mParc = text.match(/PARC\s+INJET\s+S\/DESC\s+-\s+([0-9]{1,2},\d{2}%)/i);
-  const parc_injet_s_desc_percentual = mParc ? mParc[1] : null;
-
-  const mObs = text.match(/Nota fiscal emitida conforme .*?R\$.*?\d+[.,]\d{2}\./i);
-  const observacoes = mObs ? mObs[0] : null;
-
-  const fatura_debito_automatico = false;
-
-  // ------------------------------
-  // 🔹 2. Modelo base fixo (60 chaves)
-  // ------------------------------
-  const modeloBase = {
-    unidade_consumidora: null,
-    total_a_pagar: null,
-    data_vencimento: null,
-    data_leitura_anterior: null,
-    data_leitura_atual: null,
-    data_proxima_leitura: null,
-    data_emissao: null,
-    apresentacao: null,
-    mes_ano_referencia: null,
-    leitura_anterior: null,
-    leitura_atual: null,
-    beneficio_tarifario_bruto: null,
-    beneficio_tarifario_liquido: null,
-    icms: null,
-    pis_pasep: null,
-    cofins: null,
-    fatura_debito_automatico: null,
-    credito_recebido: null,
-    saldo_kwh: null,
-    excedente_recebido: null,
-    ciclo_geracao: null,
-    informacoes_para_o_cliente: null,
-    uc_geradora: null,
-    uc_geradora_producao: null,
-    cadastro_rateio_geracao_uc: null,
-    cadastro_rateio_geracao_percentual: null,
-    injecoes_scee: [],
-    consumo_scee_quant: null,
-    consumo_scee_preco_unit_com_tributos: null,
-    consumo_scee_tarifa_unitaria: null,
-    media: null,
-    parc_injet_s_desc_percentual: null,
-    observacoes: null,
-  };
-
-  const resultadoExtraido = {
+  /* ============ RETORNO FINAL JSON ============ */
+  return {
     unidade_consumidora,
     total_a_pagar,
     data_vencimento,
@@ -260,96 +232,51 @@ async function extrairFatura(pdfBuffer) {
     cofins,
     fatura_debito_automatico,
     credito_recebido,
-    saldo_kwh,
+    saldo_kwh_total,
     excedente_recebido,
-    ciclo_geracao,
-    informacoes_para_o_cliente: infoCliente,
+    geracao_ciclo,
     uc_geradora,
     uc_geradora_producao,
     cadastro_rateio_geracao_uc,
     cadastro_rateio_geracao_percentual,
+    valor_tarifa_unitaria_sem_tributos,
     injecoes_scee,
     consumo_scee_quant,
     consumo_scee_preco_unit_com_tributos,
     consumo_scee_tarifa_unitaria,
     media,
-    parc_injet_s_desc_percentual,
-    observacoes,
+    informacoes_para_o_cliente: infoCliente,
+    observacoes
   };
-
-  return Object.assign({}, modeloBase, resultadoExtraido);
 }
 
-// ------------------------------
-// 🩺 Endpoint de saúde detalhado
-// ------------------------------
-app.get("/health", async (_, res) => {
-  try {
-    const nodeVersion = process.version;
-    const memoryUsage = process.memoryUsage();
-    const now = dayjs().format("YYYY-MM-DD HH:mm:ss");
-    const env = process.env.NODE_ENV || "production";
-
-    let pdfParseStatus = "ok";
-    try {
-      const require = createRequire(import.meta.url);
-      require("pdf-parse");
-    } catch {
-      pdfParseStatus = "erro: módulo não disponível";
-    }
-
-    res.json({
-      status: "online",
-      app_name: "extract-equatorialRender",
-      environment: env,
-      node_version: nodeVersion,
-      pdf_parse: pdfParseStatus,
-      uptime_seconds: Math.round(process.uptime()),
-      memory_mb: {
-        rss: (memoryUsage.rss / 1024 / 1024).toFixed(1),
-        heapUsed: (memoryUsage.heapUsed / 1024 / 1024).toFixed(1),
-        heapTotal: (memoryUsage.heapTotal / 1024 / 1024).toFixed(1),
-      },
-      timestamp: now,
-      port: process.env.PORT || 3000,
-      message: "Servidor de extração Equatorial Goiás operacional ✅",
-    });
-  } catch (err) {
-    res.status(500).json({
-      status: "erro",
-      message: "Falha ao consultar status do servidor",
-      detalhe: err.message,
-    });
-  }
+/* ----------------------------- ROTAS EXPRESS ----------------------------- */
+app.get("/health", (req, res) => {
+  res.json({
+    status: "online",
+    app_name: "extract-equatorialRender",
+    environment: process.env.NODE_ENV || "production",
+    node_version: process.version,
+    pdf_parse: pdfParse ? "ok" : "erro",
+    uptime_seconds: process.uptime().toFixed(0),
+    timestamp: dayjs().format("YYYY-MM-DD HH:mm:ss"),
+    port: PORT,
+    message: "Servidor de extração Equatorial Goiás operacional ✅"
+  });
 });
 
-// ------------------------------
-// 📤 Endpoint principal /extract
-// ------------------------------
 app.post("/extract", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file)
-      return res.status(400).json({ error: "Envie o PDF no campo 'file' (multipart/form-data)." });
-    const result = await extrairFatura(req.file.buffer);
-    res.json(result);
+    if (!req.file) return res.status(400).json({ error: "Arquivo PDF não enviado" });
+    const data = await extrairFatura(req.file.buffer);
+    res.json(data);
   } catch (err) {
-    console.error("Erro de extração:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ------------------------------
-// 🚀 Inicializa servidor
-// ------------------------------
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Servidor online na porta ${PORT}`));
 
-// Execução local opcional
-if (process.argv[2]) {
-  const buf = fs.readFileSync(process.argv[2]);
-  extrairFatura(buf).then((out) => {
-    console.log(JSON.stringify(out, null, 2));
-    process.exit(0);
-  });
-}
+
+
 
