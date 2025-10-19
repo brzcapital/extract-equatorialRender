@@ -61,6 +61,11 @@
  * Versão 3 – 2025-10-20
  * Compatível com Node 20.x (Render)
  */
+/**
+ * index.mjs – API Universal de Extração Equatorial Goiás
+ * Versão 4 – 2025-10-20  18:18
+ * Refinada: total_a_pagar fixo (2 casas) + débito automático inteligente
+ */
 
 import express from "express";
 import multer from "multer";
@@ -104,57 +109,59 @@ async function extrairFatura(pdfBuffer) {
   const text = normalizeText(parsed.text);
 
   /* ----------------------- Identificação básica ----------------------- */
-  const unidade_consumidora = (text.match(/(\d{8,12})\s+VENCIMENTO/i) || [])[1] ||
-                              (text.match(/(10\d{8,10})/) || [])[1] || null;
+  const unidade_consumidora =
+    (text.match(/(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\/\d{4}\s+(\d{6,12})/i) || [])[2] ||
+    (text.match(/(10\d{8,10})/) || [])[1] ||
+    null;
 
-  const mes_ano_referencia = (text.match(/(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\/\d{4}/i) || [])[1]
-    ? text.match(/(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\/\d{4}/i)[0].toUpperCase()
-    : null;
+  const mes_ano_referencia = (text.match(/(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\/\d{4}/i) || [])[0] || null;
 
   /* ----------------------- Valores principais ----------------------- */
-  const total_a_pagar = num((text.match(/R\$\**\s*([\d.,]+)/) || [])[1]);
-  const data_vencimento = (text.match(/VENCIMENTO\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
+  const totalMatch = text.match(/R\$\*+\s*([\d.]+,\d{2})/);
+  const total_a_pagar = totalMatch ? parseFloat(num(totalMatch[1]).toFixed(2)) : null;
+
+  const mVenc = text.match(/VENCIMENTO\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) ||
+                text.match(/R\$\*+[\d.,]+\s*(\d{2}\/\d{2}\/\d{4})/);
+  const data_vencimento = mVenc ? mVenc[1] : null;
 
   const data_emissao = (text.match(/EMISS[ÃA]O\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
   const apresentacao = (text.match(/APRESENTA[ÇC][AÃ]O\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
 
   /* ----------------------- Leituras ----------------------- */
-  const data_leitura_anterior = (text.match(/LEITURA\s+ANTERIOR\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
-  const data_leitura_atual = (text.match(/LEITURA\s+ATUAL\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
-  const data_proxima_leitura = (text.match(/PR[ÓO]XIMA\s+LEITURA\s*[:\-]?\s*(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
+  const data_leitura_anterior = (text.match(/LEITURA\s+ANTERIOR.*?(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
+  const data_leitura_atual = (text.match(/LEITURA\s+ATUAL.*?(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
+  const data_proxima_leitura = (text.match(/PR[ÓO]XIMA\s+LEITURA.*?(\d{2}\/\d{2}\/\d{4})/i) || [])[1] || null;
 
   /* ----------------------- Consumo SCEE ----------------------- */
-  const consumoMatch = text.match(
-    /CONSUMO\s+SCEE[\s\S]{0,80}?kWh\s*([\d.,]+)\s*([\d.,]+)\s*([\d.,]+)/i
+  const mCons = text.match(
+    /CONSUMO\s+SCEE[\s\S]{0,40}?kWh\s*([\d.,]+)\s+([\d.]+,\d{2})\s+(?:[\d.]+,\d{2})?\s*([\d.]+,\d{2})/i
   );
-  const consumo_scee_preco_unit_com_tributos = consumoMatch ? num(consumoMatch[1]) : null;
-  const consumo_scee_quant = consumoMatch ? num(consumoMatch[2]) : null;
-  const consumo_scee_tarifa_unitaria = consumoMatch ? num(consumoMatch[3]) : null;
+  const consumo_scee_preco_unit_com_tributos = mCons ? num(mCons[1]) : null;
+  const consumo_scee_quant = mCons ? num(mCons[2]) : null;
+  const consumo_scee_tarifa_unitaria = mCons ? num(mCons[3]) : null;
 
   /* ----------------------- Injeções SCEE (múltiplas) ----------------------- */
   const injecoes_scee = [];
-  const injecoesRegex =
-    /INJE[ÇC][AÃ]O\s*SCEE[\s\S]{0,60}?UC\s*(\d+)[\s\S]{0,60}?kWh\s*([\d.,]+)[\s\S]{0,60}?([\d.,]+)[\s\S]{0,60}?(-?[\d.,]+)/gi;
-  for (const m of text.matchAll(injecoesRegex)) {
+  const reInj = /INJE[ÇC][AÃ]O\s*SCEE[\s\S]{0,40}?UC\s*(\d+)[\s\S]{0,60}?kWh\s*([\d.]+,\d{2})[\s\S]{0,40}?([01],\d{6})[\s\S]{0,60}?(?:-?[\d.]+,\d{2})[\s\S]{0,20}?(-?[\d.]+,\d{2})/gi;
+  for (const m of text.matchAll(reInj)) {
     injecoes_scee.push({
       uc: m[1],
       quant_kwh: safe(num(m[2])),
-      preco_unit_com_tributos: Math.abs(num(m[3])),
-      tarifa_unitaria: Math.abs(num(m[4])),
+      preco_unit_com_tributos: safe(num(m[3])),
+      tarifa_unitaria: safe(Math.abs(num(m[4]))),
     });
   }
 
   /* ----------------------- Bloco Informações do SCEE ----------------------- */
-  const blocoSCEE = text.match(/INFORMA[ÇC][AÃ]OES?\s+DO\s+SCEE[:\-]?([\s\S]+?)INFORMA[ÇC][AÃ]OES?\s+PARA\s+O\s+CLIENTE/i);
-  const b = blocoSCEE ? blocoSCEE[1] : "";
-  const geracao_ciclo = (b.match(/\((\d{1,2}\/\d{4})\)/) || [])[1] || null;
-  const uc_geradora = (b.match(/UC\s+(\d{8,12})/i) || [])[1] || null;
-  const uc_geradora_producao = num((b.match(/UC\s+\d+\s*[:\-]?\s*([\d.,]+)/) || [])[1]);
-  const excedente_recebido = num((b.match(/EXCEDENTE\s+RECEBIDO.*?([\d.,]+)/i) || [])[1]);
-  const credito_recebido = num((b.match(/CR[ÉE]DITO\s+RECEBIDO.*?([\d.,]+)/i) || [])[1]);
-  const saldo_kwh_total = num((b.match(/SALDO\s+KWH.*?([\d.,]+)/i) || [])[1]);
-  const cadastro_rateio_geracao_uc = (b.match(/CADASTRO\s+RATEIO.*?UC\s+(\d+)/i) || [])[1] || null;
-  const cadastro_rateio_geracao_percentual = (b.match(/=\s*([\d.,]+%)/) || [])[1] || null;
+  const bSCEE = (text.match(/INFORMA[ÇC][AÃ]OES?\s+DO\s+SCEE[:\-]?\s*([\s\S]+?)(?=INFORMA|ENERGIA|A\s+EQUATORIAL|$)/i) || [])[1] || "";
+  const geracao_ciclo = (bSCEE.match(/\((\d{1,2}\/\d{4})\)/) || [])[1] || null;
+  const uc_geradora = (bSCEE.match(/UC\s+(\d{8,12})/i) || [])[1] || null;
+  const uc_geradora_producao = num((bSCEE.match(/UC\s+\d+\s*[:\-]?\s*([\d.]+,\d{2})/) || [])[1]);
+  const excedente_recebido = num((bSCEE.match(/EXCEDENTE\s+RECEBIDO.*?([\d.]+,\d{2})/i) || [])[1]);
+  const credito_recebido = num((bSCEE.match(/CR[ÉE]DITO\s+RECEBIDO.*?([\d.]+,\d{2})/i) || [])[1]);
+  const saldo_kwh_total = num((bSCEE.match(/SALDO\s+KWH.*?([\d.]+,\d{2})/i) || [])[1]);
+  const cadastro_rateio_geracao_uc = (bSCEE.match(/CADASTRO\s+RATEIO.*?UC\s+(\d+)/i) || [])[1] || null;
+  const cadastro_rateio_geracao_percentual = (bSCEE.match(/=\s*([\d.,]+%)/) || [])[1] || null;
 
   /* ----------------------- Benefícios e tributos ----------------------- */
   const beneficio_tarifario_bruto = num((text.match(/BENEF[ÍI]CIO\s+TARIF[ÁA]RIO\s+BRUTO.*?([\d.,]+)/i) || [])[1]);
@@ -163,12 +170,20 @@ async function extrairFatura(pdfBuffer) {
   const pis_pasep = /PIS/i.test(text) ? 0 : null;
   const cofins = /COFINS/i.test(text) ? 0 : null;
 
-  /* ----------------------- Débito Automático ----------------------- */
-  const fatura_debito_automatico = /D[ÉE]BITO\s+AUTOM[ÁA]TICO/i.test(text) ? "yes" : "no";
+  /* ----------------------- Débito Automático (nova regra) ----------------------- */
+  let fatura_debito_automatico = "no";
+  if (/FATURA\s+COM\s+LAN[ÇC]AMENTO\s+PARA\s+D[ÉE]BITO\s+AUTOM[ÁA]TICO/i.test(text)) {
+    fatura_debito_automatico = "yes";
+  }
+  if (/Aproveite\s+os\s+benef[íi]cios\s+do\s+d[ée]bito\s+autom[áa]tico/i.test(text) ||
+      /\b0\d{9,}\b/.test(text)) {
+    fatura_debito_automatico = "no";
+  }
 
-  /* ----------------------- Informações / Observações ----------------------- */
-  const informacoes_para_o_cliente = (text.match(/INFORMA[ÇC][AÃ]OES?\s+PARA\s+O\s+CLIENTE[:\-]?\s*(.*?)(?=Processo|CADASTRO|NOTA|$)/i) || [])[1] || null;
-  const observacoes = (text.match(/Processo\s+\d+\s*-\s*[\d.-]+\s*-\s*Valor\s+controverso\s+R\$\s*[\d.,]+/i) || [])[0] || null;
+  /* ----------------------- Textos ----------------------- */
+  const informacoes_para_o_cliente = (text.match(/INFORMA[ÇC][AÃ]OES?\s+PARA\s+O\s+CLIENTE[:\-]?\s*([\s\S]+?)(?=ENERGIA\s+ATIVA|NOTA\s+FISCAL|A\s+EQUATORIAL|$)/i) || [])[1] || null;
+  const mObs = text.match(/Processo\s+\d+\s*-\s*[\d.-]+\s*-\s*Valor\s+controverso\s+R\$\s*[\d.,]+\./i);
+  const observacoes = mObs ? mObs[0] : null;
 
   /* ----------------------- Média ----------------------- */
   const historicos = Array.from(text.matchAll(/\b(\d{3,4}),00\b/g)).map((m) => num(m[1] + ",00"));
@@ -212,7 +227,7 @@ async function extrairFatura(pdfBuffer) {
   };
 }
 
-/* ----------------------- Rotas Express ----------------------- */
+/* ----------------------- Rotas ----------------------- */
 app.get("/health", (req, res) => {
   res.json({
     status: "online",
@@ -243,4 +258,5 @@ app.post("/extract", upload.single("file"), async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`✅ Servidor online na porta ${PORT}`));
+
 
