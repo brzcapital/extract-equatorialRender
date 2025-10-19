@@ -1,157 +1,112 @@
-import express from "express";
-import multer from "multer";
-import pdfParse from "pdf-parse-fixed";
-import fetch from "node-fetch";
-import dotenv from "dotenv";
+/**
+ * index.mjs – Extração estruturada de faturas Equatorial Goiás
+ * Atualizado em: 19/10/2025
+ * Autor: BRZ Capital (com refinamento assistido)
+ */
 
-dotenv.config();
+import fs from "fs";
+import pdfParse from "pdf-parse";
+import dayjs from "dayjs";
 
-const app = express();
-const upload = multer({ storage: multer.memoryStorage() });
+/**
+ * Função principal de extração
+ * @param {Buffer} pdfBuffer - conteúdo do PDF
+ * @returns {Object} objeto JSON estruturado conforme modelo "faturaequatorial"
+ */
+export async function extrairFatura(pdfBuffer) {
+  const data = await pdfParse(pdfBuffer);
+  const text = data.text.replace(/\s+/g, " ").trim();
 
-// Endpoint de Health atualizado
-app.get("/health", async (req, res) => {
-  try {
-    const fs = await import("fs");
-    const path = "./uploads/json/";
-    const usageFile = "./usage.json";
+  // ---------- BLOCOS DE EXTRAÇÃO ----------
 
-    let usageData = {
-      month: new Date().toISOString().slice(0, 7),
-      total_tokens_month: 0,
-      last_extraction_tokens: 0,
-      extraction_health: "OK",
-      processed_count: 0,
-      recent: []
-    };
+  // 🗓️ Datas de leitura (anterior, atual, próxima)
+  const datasLeit = Array.from(text.matchAll(/\b\d{2}\/\d{2}\/\d{4}\b/g)).map(m => m[0]);
+  const data_leitura_anterior = datasLeit[0] || null;
+  const data_leitura_atual = datasLeit[1] || null;
+  const data_proxima_leitura = datasLeit[2] || null;
 
-    // Lê arquivo de uso se existir
-    if (fs.existsSync(usageFile)) {
-      const raw = fs.readFileSync(usageFile, "utf-8");
-      const parsed = JSON.parse(raw);
-      usageData = { ...usageData, ...parsed };
-    }
+  // 📅 Data de apresentação (após ANEEL 3407/24)
+  let apresentacao = null;
+  const matchApres = text.match(/ANEEL[^\d]*(\d{2}\/\d{2}\/\d{4})\s+\d{4}\/\d{2}/i);
+  if (matchApres) apresentacao = matchApres[1];
 
-    // Verifica se há arquivos recentes no diretório de JSONs
-    const recentExtractions = [];
-    if (fs.existsSync(path)) {
-      const dirs = fs.readdirSync(path);
-      dirs.forEach((dir) => {
-        const dirPath = `${path}${dir}`;
-        const files = fs.readdirSync(dirPath);
-        files.slice(-5).forEach((file) => {
-          recentExtractions.push({
-            file,
-            path: `${dirPath}/${file}`,
-            date: dir
-          });
-        });
-      });
-    }
-
-    usageData.recent = recentExtractions;
-
-    res.status(200).json({
-      status: "online",
-      timestamp: new Date().toISOString(),
-      version: "vC-2025.10.17",
-      server: "Render Node 22",
-      health: "✅ Operacional",
-      usage: usageData
-    });
-  } catch (err) {
-    console.error("Erro no health:", err);
-    res.status(500).json({ status: "error", message: err.message });
+  // 🔢 Leitura anterior e atual (ENERGIA ATIVA)
+  let leitura_anterior = null;
+  let leitura_atual = null;
+  const matchLeituras = text.match(/ENERGIA\s+ATIVA\s*-\s*KWH\s+(\d+)\s+\d+\s+(\d+)/i);
+  if (matchLeituras) {
+    leitura_anterior = parseInt(matchLeituras[1]);
+    leitura_atual = parseInt(matchLeituras[2]);
   }
-});
 
-async function extractTextFromPDF(buffer) {
-  const data = await pdfParse(buffer);
-  const text = (data.text || "").trim();
-  return text;
-}
+  // ⚡ Injeções SCEE (valores conforme fatura)
+  const injecoes = [];
+  for (const m of text.matchAll(/INJEÇÃO\s+SCEE\s*-\s*UC\s+(\d+).*?kWh\s+([\d,]+)\s+([\d,]+)[^-\d,]+(-?\d+,\d+)/g)) {
+    const [ , uc, preco, quant, valorTotal ] = m;
+    const inj = {
+      uc: uc.trim(),
+      preco_unit_com_tributos: parseFloat(preco.replace(',', '.')),
+      quant_kwh: parseFloat(quant.replace(',', '.')),
+      tarifa_unitaria: Math.abs(parseFloat(valorTotal.replace(',', '.'))), // ignora sinal negativo
+    };
+    injecoes.push(inj);
 
-async function callOpenAIChatStrictJSON(pdfText, apiKey) {
-  const payload = {
-    model: "gpt-4o-2024-08-06",
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content:
-          "Você é um extrator de dados de faturas Equatorial Goiás. Retorne SOMENTE um JSON válido (um objeto) com todos os campos solicitados, preenchendo com null ou 0 se não existir. Nunca adicione explicações."
-      },
-      {
-        role: "user",
-        content:
-          "Extraia do texto da fatura os seguintes campos: unidade_consumidora, total_a_pagar, data_vencimento, data_leitura_anterior, data_leitura_atual, data_proxima_leitura, data_emissao, apresentacao, mes_ano_referencia, leitura_anterior, leitura_atual, beneficio_tarifario_bruto, beneficio_tarifario_liquido, icms, pis_pasep, cofins, fatura_debito_automatico, credito_recebido, saldo_kwh, excedente_recebido, ciclo_geracao, informacoes_para_o_cliente, uc_geradora, uc_geradora_producao, cadastro_rateio_geracao_uc, cadastro_rateio_geracao_percentual, injecoes_scee (lista com: uc, quant_kwh, preco_unit_com_tributos, tarifa_unitaria), consumo_scee_quant, consumo_scee_preco_unit_com_tributos, consumo_scee_tarifa_unitaria, media, parc_injet_s_desc_percentual, observacoes.\n\nTexto da fatura:\n" +
-          pdfText
-      }
-    ]
+    // 🔎 Validação (não altera o resultado)
+    const calculado = parseFloat((inj.quant_kwh * inj.preco_unit_com_tributos).toFixed(2));
+    if (Math.abs(calculado - inj.tarifa_unitaria) > 1) {
+      console.warn(`⚠️ Divergência detectada em UC ${inj.uc}: calculado=${calculado} vs fatura=${inj.tarifa_unitaria}`);
+    }
+  }
+
+  // 💡 Consumo SCEE tarifa unitária
+  const matchTarifa = text.match(/CONSUMO\s+SCEE\s+kWh\s+([\d,]+)/i);
+  const consumo_scee_tarifa_unitaria = matchTarifa
+    ? parseFloat(matchTarifa[1].replace(',', '.'))
+    : null;
+
+  // 📊 Média de consumo (histórico)
+  const consumos = Array.from(text.matchAll(/\b(\d{3,4}),00\b/g)).map(m => parseFloat(m[1].replace(',', '.')));
+  const media = consumos.length ? parseFloat((consumos.reduce((a, b) => a + b) / consumos.length).toFixed(2)) : null;
+
+  // 🧾 Outras extrações simples (amostra)
+  const matchUC = text.match(/\b(\d{8,11})\b(?=.*EQUATORIAL)/);
+  const unidade_consumidora = matchUC ? matchUC[1] : null;
+
+  const matchVenc = text.match(/\b(\d{2}\/\d{2}\/\d{4})\b(?=.*R\$)/);
+  const data_vencimento = matchVenc ? matchVenc[1] : null;
+
+  const matchTotal = text.match(/R\$[*]*\s*([\d,.]+)/);
+  const total_a_pagar = matchTotal ? parseFloat(matchTotal[1].replace(',', '.')) : null;
+
+  const matchEmissao = text.match(/DATA\s+DE\s+EMISSÃO:\s*(\d{2}\/\d{2}\/\d{4})/i);
+  const data_emissao = matchEmissao ? matchEmissao[1] : null;
+
+  // ---------- OBJETO FINAL ----------
+  const resultado = {
+    unidade_consumidora,
+    total_a_pagar,
+    data_vencimento,
+    data_leitura_anterior,
+    data_leitura_atual,
+    data_proxima_leitura,
+    data_emissao,
+    apresentacao,
+    leitura_anterior,
+    leitura_atual,
+    injecoes_scee: injecoes,
+    consumo_scee_tarifa_unitaria,
+    media,
   };
 
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const json = await resp.json();
-  console.log("🧠 OpenAI RAW:", JSON.stringify(json, null, 2).slice(0, 2000));
-
-  let content = null;
-  if (json?.choices?.[0]?.message?.content) {
-    content = json.choices[0].message.content;
-  }
-  if (!content && json?.choices?.[0]?.message?.content?.[0]?.text) {
-    content = json.choices[0].message.content[0].text;
-  }
-  if (!content && json?.output_text) {
-    content = json.output_text;
-  }
-
-  if (!content || typeof content !== "string") {
-    console.warn("⚠️ Nenhum conteúdo textual retornado pelo GPT.");
-    return null;
-  }
-
-  try {
-    const cleaned = content.trim().replace(/^[^{]*({[\s\S]*})[^}]*$/, "$1");
-    return JSON.parse(cleaned);
-  } catch (err) {
-    console.error("⚠️ Erro ao converter resposta em JSON:", err);
-    return null;
-  }
+  return resultado;
 }
 
-app.post("/extract-hybrid", upload.single("file"), async (req, res) => {
-  try {
-    const apiKey = req.body.api_key || process.env.OPENAI_API_KEY;
-    if (!apiKey) return res.status(400).json({ error: "API key ausente." });
-    if (!req.file) return res.status(400).json({ error: "Arquivo PDF ausente." });
+// ---------- EXECUÇÃO LOCAL (teste manual) ----------
+if (process.argv[2]) {
+  const path = process.argv[2];
+  const buffer = fs.readFileSync(path);
+  extrairFatura(buffer).then(r => {
+    console.log(JSON.stringify(r, null, 2));
+  });
+}
 
-    const text = await extractTextFromPDF(req.file.buffer);
-    if (!text || text.length < 50) {
-      return res.status(422).json({ error: "Texto insuficiente extraído do PDF." });
-    }
-
-    const result = await callOpenAIChatStrictJSON(text, apiKey);
-    if (!result) {
-      return res.status(500).json({
-        error: "Falha ao processar a fatura. GPT não retornou conteúdo válido.",
-      });
-    }
-
-    res.json(result);
-  } catch (err) {
-    console.error("❌ Erro geral:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
