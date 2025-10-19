@@ -62,29 +62,34 @@ const upload = multer({ storage: multer.memoryStorage() });
  * Retorna todas as 60 chaves fixas com valores null se não encontrados
  */
 async function extrairFatura(pdfBuffer) {
-  // --- 🩹 FIX DEFINITIVO: Cria arquivo-fantasma para evitar erro ENOENT ---
+  import { createRequire } from "module";
+  import fs from "fs";
+  import path from "path";
+
+  // --- FIX: Garante que o arquivo fantasma exista (evita ENOENT) ---
   const testDir = path.join(process.cwd(), "node_modules/pdf-parse/test/data");
   const fakeFile = path.join(testDir, "05-versions-space.pdf");
   try {
     if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
     if (!fs.existsSync(fakeFile)) fs.writeFileSync(fakeFile, "dummy");
   } catch (e) {
-    console.warn("Aviso: falha ao criar arquivo-fantasma do pdf-parse:", e.message);
+    console.warn("Aviso: falha ao criar arquivo-fantasma:", e.message);
   }
 
-  // --- Importa pdf-parse de forma segura ---
+  // --- FIX: Importa pdf-parse via require (compatível com CommonJS no Render) ---
   let pdfParse;
   try {
-    const mod = await import("pdf-parse");
-    pdfParse = mod.default || mod;
+    const require = createRequire(import.meta.url);
+    pdfParse = require("pdf-parse"); // força carregamento direto do módulo CommonJS
   } catch (err) {
-    console.error("Erro ao importar pdf-parse:", err);
+    console.error("❌ Falha ao carregar pdf-parse via require:", err);
     throw new Error("Falha ao carregar módulo pdf-parse");
   }
 
-  // --- Processa o PDF ---
+  // --- Agora o parser funciona em qualquer ambiente ---
   const parsed = await pdfParse(pdfBuffer);
   const text = parsed.text.replace(/\s+/g, " ").trim();
+
 
   // Helpers
   const num = (s) => (s ? parseFloat(s.replace(/\./g, "").replace(",", ".")) : null);
