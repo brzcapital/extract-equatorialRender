@@ -40,9 +40,10 @@
  * Corrigido e testado com Node 20.19.x no Render
  */
 /**
+/**/**
  * index.mjs – API de extração Equatorial Goiás
- * Versão final: 20/10/2025
- * Corrigido e testado com Node 20.19.x no Render
+ * Versão final estável – 20/10/2025
+ * Compatível com Render (Node 20.x)
  */
 
 import express from "express";
@@ -50,10 +51,8 @@ import multer from "multer";
 import dayjs from "dayjs";
 import fs from "fs";
 import path from "path";
+import { createRequire } from "module";
 
-// ------------------------------
-// 🚀 Inicialização do servidor
-// ------------------------------
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -62,11 +61,7 @@ const upload = multer({ storage: multer.memoryStorage() });
  * Retorna todas as 60 chaves fixas com valores null se não encontrados
  */
 async function extrairFatura(pdfBuffer) {
-  import { createRequire } from "module";
-  import fs from "fs";
-  import path from "path";
-
-  // --- FIX: Garante que o arquivo fantasma exista (evita ENOENT) ---
+  // --- 🩹 FIX DEFINITIVO: Cria arquivo-fantasma do pdf-parse (evita ENOENT) ---
   const testDir = path.join(process.cwd(), "node_modules/pdf-parse/test/data");
   const fakeFile = path.join(testDir, "05-versions-space.pdf");
   try {
@@ -76,20 +71,19 @@ async function extrairFatura(pdfBuffer) {
     console.warn("Aviso: falha ao criar arquivo-fantasma:", e.message);
   }
 
-  // --- FIX: Importa pdf-parse via require (compatível com CommonJS no Render) ---
+  // --- Importação compatível com CommonJS e Render ---
   let pdfParse;
   try {
     const require = createRequire(import.meta.url);
-    pdfParse = require("pdf-parse"); // força carregamento direto do módulo CommonJS
+    pdfParse = require("pdf-parse");
   } catch (err) {
     console.error("❌ Falha ao carregar pdf-parse via require:", err);
     throw new Error("Falha ao carregar módulo pdf-parse");
   }
 
-  // --- Agora o parser funciona em qualquer ambiente ---
+  // --- Processa o PDF ---
   const parsed = await pdfParse(pdfBuffer);
   const text = parsed.text.replace(/\s+/g, " ").trim();
-
 
   // Helpers
   const num = (s) => (s ? parseFloat(s.replace(/\./g, "").replace(",", ".")) : null);
@@ -162,7 +156,7 @@ async function extrairFatura(pdfBuffer) {
   const mRef = text.match(/\b([A-Z]{3}\/\d{4})\b/);
   const mes_ano_referencia = mRef ? mRef[1] : null;
 
-  // Blocos informativos
+  // Bloco "Informações para o cliente"
   const infoCliente = (() => {
     const m = text.match(
       /O FATURAMENTO DAS INSTALAÇÕES.*?A EQUATORIAL ENERGIA AGRADECE PELA PONTUALIDADE.*?(?= ENERGIA ATIVA| NOTA FISCAL|$)/i
@@ -170,7 +164,7 @@ async function extrairFatura(pdfBuffer) {
     return m ? m[0].trim() : null;
   })();
 
-  // SCEE
+  // Campos adicionais
   const mUcGer = text.match(/UC\s+(\d{8,12})\s*:\s*([\d.]+,\d{2})/i);
   const uc_geradora = mUcGer ? mUcGer[1] : null;
   const uc_geradora_producao = mUcGer ? num(mUcGer[2]) : null;
@@ -298,8 +292,8 @@ app.get("/health", async (_, res) => {
 
     let pdfParseStatus = "ok";
     try {
-      const { default: pdfParse } = await import("pdf-parse");
-      if (!pdfParse) pdfParseStatus = "erro: não carregado";
+      const require = createRequire(import.meta.url);
+      require("pdf-parse");
     } catch {
       pdfParseStatus = "erro: módulo não disponível";
     }
