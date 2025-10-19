@@ -39,8 +39,8 @@
  * Versão final: 20/10/2025
  * Corrigido e testado com Node 20.19.x no Render
  */
+
 /**
-/**/**
  * index.mjs – API de extração Equatorial Goiás
  * Versão final estável – 20/10/2025
  * Compatível com Render (Node 20.x)
