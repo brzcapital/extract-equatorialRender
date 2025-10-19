@@ -43,10 +43,38 @@ import dayjs from "dayjs";
  * Retorna todas as 60 chaves fixas com valores null se não encontrados
  */
 async function extrairFatura(pdfBuffer) {
-  // 🩹 Importa pdf-parse dinamicamente (evita bug ENOENT no Render)
-  const { default: pdfParse } = await import("pdf-parse");
+  // --- FIX DEFINITIVO PARA O ERRO ENOENT DO PDF-PARSE ---
+  import fs from "fs";
+  import path from "path";
+
+  const testDir = path.join(process.cwd(), "node_modules/pdf-parse/test/data");
+  const fakeFile = path.join(testDir, "05-versions-space.pdf");
+
+  try {
+    if (!fs.existsSync(testDir)) {
+      fs.mkdirSync(testDir, { recursive: true });
+    }
+    if (!fs.existsSync(fakeFile)) {
+      fs.writeFileSync(fakeFile, "dummy");
+    }
+  } catch (e) {
+    console.error("Erro ao criar arquivo fake:", e.message);
+  }
+
+  // --- Importa pdf-parse de forma segura ---
+  let pdfParse;
+  try {
+    const mod = await import("pdf-parse");
+    pdfParse = mod.default || mod;
+  } catch (err) {
+    console.error("Erro ao importar pdf-parse:", err);
+    throw new Error("Falha ao carregar módulo pdf-parse");
+  }
+
+  // Agora sim o parser é chamado com segurança
   const parsed = await pdfParse(pdfBuffer);
   const text = parsed.text.replace(/\s+/g, " ").trim();
+
 
   // Helpers
   const num = (s) => (s ? parseFloat(s.replace(/\./g, "").replace(",", ".")) : null);
